@@ -259,6 +259,20 @@ const handleCorrection = () => {
     
     nextTick(() => {
       try {
+        // 보정 전 원본 이미지 정보 저장 (라벨 저장용)
+        const img = imageDrawRef.value?.imageRef?.value || imageDrawRef.value?.imageRef || imageRef.value
+        if (img) {
+          savedImageInfo.value = {
+            naturalWidth: img.naturalWidth || img.width,
+            naturalHeight: img.naturalHeight || img.height,
+            displayWidth: img.offsetWidth,
+            displayHeight: img.offsetHeight
+          }
+        }
+        
+        // 보정 전 선분 정보 저장 (라벨 저장용)
+        savedLines.value = JSON.parse(JSON.stringify(lines.value))
+        
         applyPerspectiveTransform()
         
         // 처리된 이미지 저장
@@ -772,6 +786,369 @@ const progressPercentage = computed(() => {
   return Math.round((processedCount / imageList.value.length) * 100)
 })
 
+// ==================== 라벨 관리 ====================
+// labels.json 데이터 (메모리 및 localStorage에 저장)
+const labelsData = ref({})
+
+// File System Access API를 위한 파일 핸들 저장
+const labelsFileHandle = ref(null)
+
+// 보정 전 선분 정보 저장 (결과 화면에서 사용)
+const savedLines = ref([])
+
+// 보정 전 원본 이미지 정보 저장 (라벨 저장용)
+const savedImageInfo = ref({
+  naturalWidth: 0,
+  naturalHeight: 0,
+  displayWidth: 0,
+  displayHeight: 0
+})
+
+// localStorage에서 기존 라벨 로드
+const loadLabels = () => {
+  try {
+    const existingData = localStorage.getItem('labels')
+    if (existingData) {
+      labelsData.value = JSON.parse(existingData)
+    } else {
+      labelsData.value = {}
+    }
+  } catch (e) {
+    console.warn('기존 라벨 데이터를 읽을 수 없습니다:', e)
+    labelsData.value = {}
+  }
+}
+
+// 파일에서 라벨 로드 (File System Access API)
+const loadLabelsFromFile = async () => {
+  if (!labelsFileHandle.value) return
+  
+  try {
+    const file = await labelsFileHandle.value.getFile()
+    const text = await file.text()
+    const data = JSON.parse(text)
+    labelsData.value = data
+    localStorage.setItem('labels', JSON.stringify(data, null, 2))
+  } catch (e) {
+    console.warn('파일에서 라벨을 읽을 수 없습니다:', e)
+  }
+}
+
+// 파일에 라벨 저장 (File System Access API)
+const saveLabelsToFile = async () => {
+  if (!labelsFileHandle.value) return
+  
+  try {
+    const writable = await labelsFileHandle.value.createWritable()
+    await writable.write(labelsJsonContent.value)
+    await writable.close()
+    console.log('labels.json 파일이 업데이트되었습니다.')
+  } catch (e) {
+    console.error('파일 저장 실패:', e)
+    alert('파일 저장에 실패했습니다: ' + e.message)
+  }
+}
+
+// labels.json 파일 선택 및 저장 위치 설정
+const selectLabelsFile = async () => {
+  try {
+    // File System Access API 지원 확인
+    if (!('showSaveFilePicker' in window)) {
+      alert('이 브라우저는 파일 저장 기능을 지원하지 않습니다.\nChrome, Edge (최신 버전)를 사용해주세요.')
+      return
+    }
+    
+    // 기존 파일 핸들이 있으면 그대로 사용, 없으면 새로 선택
+    if (!labelsFileHandle.value) {
+      const handle = await window.showSaveFilePicker({
+        suggestedName: 'labels.json',
+        types: [{
+          description: 'JSON 파일',
+          accept: { 'application/json': ['.json'] }
+        }]
+      })
+      labelsFileHandle.value = handle
+    }
+    
+    // 파일에 저장
+    await saveLabelsToFile()
+    alert('labels.json 파일이 저장되었습니다!')
+  } catch (e) {
+    if (e.name !== 'AbortError') {
+      console.error('파일 선택 실패:', e)
+      alert('파일 선택에 실패했습니다: ' + e.message)
+    }
+  }
+}
+
+// 초기 로드
+loadLabels()
+
+// labels.json 내용을 JSON 문자열로 반환
+const labelsJsonContent = computed(() => {
+  return JSON.stringify(labelsData.value, null, 2)
+})
+
+/**
+ * 라벨 저장 (교점 좌표를 labels.json에 추가)
+ */
+const saveLabel = () => {
+  // 결과 화면에서는 savedLines 사용, 그리기 화면에서는 lines 사용
+  const linesToUse = savedLines.value.length > 0 ? savedLines.value : lines.value
+  
+  if (linesToUse.length !== 4) {
+    alert('4개의 선분이 필요합니다.')
+    return
+  }
+  
+  const horizontalLines = linesToUse.filter(l => l.type === 'horizontal')
+  const verticalLines = linesToUse.filter(l => l.type === 'vertical')
+  
+  if (horizontalLines.length !== 2 || verticalLines.length !== 2) {
+    alert('수평선 2개와 수직선 2개가 필요합니다.')
+    return
+  }
+  
+  // 저장된 이미지 정보 사용 (결과 화면에서는 imageDrawRef가 없을 수 있음)
+  let imgNaturalWidth = savedImageInfo.value.naturalWidth
+  let imgNaturalHeight = savedImageInfo.value.naturalHeight
+  let imgDisplayWidth = savedImageInfo.value.displayWidth
+  let imgDisplayHeight = savedImageInfo.value.displayHeight
+  
+  // 저장된 정보가 없으면 현재 이미지에서 가져오기 시도
+  if (!imgNaturalWidth || !imgNaturalHeight || !imgDisplayWidth || !imgDisplayHeight) {
+    const img = imageDrawRef.value?.imageRef?.value || imageDrawRef.value?.imageRef || imageRef.value
+    if (img && img.naturalWidth && img.naturalHeight) {
+      imgNaturalWidth = img.naturalWidth || img.width
+      imgNaturalHeight = img.naturalHeight || img.height
+      imgDisplayWidth = img.offsetWidth || img.width
+      imgDisplayHeight = img.offsetHeight || img.height
+    } else {
+      // 이미지 파일에서 직접 크기 가져오기 (동기적으로 처리)
+      const currentImageItem = imageList.value[currentImageIndex.value]
+      if (currentImageItem?.file) {
+        // 파일에서 이미지 크기 읽기 (FileReader 사용)
+        const reader = new FileReader()
+        reader.onload = (e) => {
+          const img = new Image()
+          img.onload = () => {
+            imgNaturalWidth = img.naturalWidth
+            imgNaturalHeight = img.naturalHeight
+            imgDisplayWidth = img.width
+            imgDisplayHeight = img.height
+            // 저장된 정보 업데이트
+            savedImageInfo.value = {
+              naturalWidth: imgNaturalWidth,
+              naturalHeight: imgNaturalHeight,
+              displayWidth: imgDisplayWidth,
+              displayHeight: imgDisplayHeight
+            }
+            // 라벨 저장 계속 진행
+            continueSaveLabel(imgNaturalWidth, imgNaturalHeight, imgDisplayWidth, imgDisplayHeight, linesToUse, horizontalLines, verticalLines)
+          }
+          img.src = e.target.result
+        }
+        reader.readAsDataURL(currentImageItem.file)
+        return // 비동기 처리 중이므로 여기서 종료
+      } else {
+        alert('이미지 정보를 찾을 수 없습니다.')
+        return
+      }
+    }
+  }
+  
+  // 동기적으로 처리 가능한 경우
+  continueSaveLabel(imgNaturalWidth, imgNaturalHeight, imgDisplayWidth, imgDisplayHeight, linesToUse, horizontalLines, verticalLines)
+}
+
+/**
+ * 라벨 저장 계속 진행 (이미지 크기 정보가 준비된 후)
+ */
+const continueSaveLabel = (imgNaturalWidth, imgNaturalHeight, imgDisplayWidth, imgDisplayHeight, linesToUse, horizontalLines, verticalLines) => {
+  if (!imgNaturalWidth || !imgNaturalHeight || !imgDisplayWidth || !imgDisplayHeight) {
+    alert('이미지 크기 정보를 찾을 수 없습니다.')
+    return
+  }
+  
+  const scaleX = imgNaturalWidth / imgDisplayWidth
+  const scaleY = imgNaturalHeight / imgDisplayHeight
+  
+  // 교점 계산 (화면 좌표) - savedLines 또는 lines 사용
+  const calculateIntersectionsFromLines = (linesArray) => {
+    if (linesArray.length !== 4) return []
+    
+    const hLines = linesArray.filter(l => l.type === 'horizontal')
+    const vLines = linesArray.filter(l => l.type === 'vertical')
+    
+    if (hLines.length !== 2 || vLines.length !== 2) return []
+    
+    const intersections = []
+    for (const hLine of hLines) {
+      for (const vLine of vLines) {
+        const intersection = getLineIntersection(hLine, vLine)
+        if (intersection) {
+          intersections.push(intersection)
+        }
+      }
+    }
+    
+    intersections.sort((a, b) => {
+      if (Math.abs(a.y - b.y) > 10) {
+        return a.y - b.y
+      }
+      return a.x - b.x
+    })
+    
+    return intersections
+  }
+  
+  const intersections = calculateIntersectionsFromLines(linesToUse)
+  if (intersections.length !== 4) {
+    alert('4개의 교점을 계산할 수 없습니다.')
+    return
+  }
+  
+  // 수직선과 수평선 정렬
+  verticalLines.sort((a, b) => {
+    const aX = (a.start.x + a.end.x) / 2
+    const bX = (b.start.x + b.end.x) / 2
+    return aX - bX // 왼쪽부터
+  })
+  
+  horizontalLines.sort((a, b) => {
+    const aY = (a.start.y + a.end.y) / 2
+    const bY = (b.start.y + b.end.y) / 2
+    return aY - bY // 위부터
+  })
+  
+  const vLine1 = verticalLines[0]
+  const vLine2 = verticalLines[1]
+  const hLine1 = horizontalLines[0]
+  const hLine2 = horizontalLines[1]
+  
+  // 실제 교점 계산 (화면 좌표)
+  const p1 = getLineIntersection(vLine1, hLine1) // 좌상
+  const p2 = getLineIntersection(vLine2, hLine1) // 우상
+  const p3 = getLineIntersection(vLine1, hLine2) // 좌하
+  const p4 = getLineIntersection(vLine2, hLine2) // 우하
+  
+  if (!p1 || !p2 || !p3 || !p4) {
+    alert('교점을 계산할 수 없습니다.')
+    return
+  }
+  
+  // 이미지 좌표로 변환
+  const vLine1_x = p1.x * scaleX
+  const vLine2_x = p2.x * scaleX
+  const hLine1_y = p1.y * scaleY
+  const hLine2_y = p3.y * scaleY
+  
+  // 이미지 파일명 가져오기
+  const currentImageItem = imageList.value[currentImageIndex.value]
+  const imageName = currentImageItem?.name || `image_${String(currentImageIndex.value + 1).padStart(3, '0')}.png`
+  
+  // 라벨 데이터 생성
+  const points = {
+    p1_top_left: [vLine1_x, hLine1_y],
+    p2_top_right: [vLine2_x, hLine1_y],
+    p3_bottom_left: [vLine1_x, hLine2_y],
+    p4_bottom_right: [vLine2_x, hLine2_y]
+  }
+  
+  // 새 라벨 추가
+  labelsData.value[imageName] = points
+  
+  // localStorage에 저장
+  localStorage.setItem('labels', JSON.stringify(labelsData.value, null, 2))
+  
+  // 파일 핸들이 있으면 파일에도 자동 저장
+  if (labelsFileHandle.value) {
+    try {
+      await saveLabelsToFile()
+    } catch (e) {
+      console.warn('파일 저장 실패:', e)
+    }
+  }
+  
+  alert(`라벨이 저장되었습니다!\n이미지: ${imageName}`)
+}
+
+/**
+ * labels.json 다운로드 (또는 파일 저장 위치 설정)
+ */
+const downloadLabelsJson = async () => {
+  // File System Access API를 지원하는 경우 파일 저장 위치 선택
+  if ('showSaveFilePicker' in window && !labelsFileHandle.value) {
+    const useFileSystem = confirm('파일 저장 위치를 설정하시겠습니까?\n\n"확인"을 누르면 프로그램 폴더에 labels.json 파일을 저장할 수 있습니다.\n"취소"를 누르면 일반 다운로드로 진행됩니다.')
+    
+    if (useFileSystem) {
+      await selectLabelsFile()
+      return
+    }
+  }
+  
+  // 기존 파일 핸들이 있으면 파일에 저장
+  if (labelsFileHandle.value) {
+    await saveLabelsToFile()
+    alert('labels.json 파일이 업데이트되었습니다!')
+    return
+  }
+  
+  // 일반 다운로드
+  const blob = new Blob([labelsJsonContent.value], { type: 'application/json' })
+  const url = URL.createObjectURL(blob)
+  const link = document.createElement('a')
+  link.href = url
+  link.download = 'labels.json'
+  link.click()
+  URL.revokeObjectURL(url)
+}
+
+/**
+ * 특정 이미지의 라벨 삭제
+ */
+const deleteLabel = (imageName) => {
+  if (confirm(`"${imageName}"의 라벨을 삭제하시겠습니까?`)) {
+    delete labelsData.value[imageName]
+    localStorage.setItem('labels', JSON.stringify(labelsData.value, null, 2))
+  }
+}
+
+/**
+ * 모든 라벨 삭제
+ */
+const clearAllLabels = async () => {
+  if (confirm('모든 라벨을 삭제하시겠습니까?')) {
+    labelsData.value = {}
+    localStorage.removeItem('labels')
+    
+    // 파일에도 저장
+    if (labelsFileHandle.value) {
+      try {
+        await saveLabelsToFile()
+      } catch (e) {
+        console.warn('파일 저장 실패:', e)
+      }
+    }
+  }
+}
+
+/**
+ * 파일 저장 위치 정보 표시
+ */
+const showFileInfo = async () => {
+  if (labelsFileHandle.value) {
+    try {
+      const file = await labelsFileHandle.value.getFile()
+      alert(`현재 저장 위치:\n${file.name}\n\n파일 크기: ${(file.size / 1024).toFixed(2)} KB`)
+    } catch (e) {
+      alert('파일 정보를 가져올 수 없습니다.')
+    }
+  } else {
+    alert('파일 저장 위치가 설정되지 않았습니다.\n"labels.json 다운로드" 버튼을 클릭하여 저장 위치를 설정하세요.')
+  }
+}
+
 // ==================== 이미지 저장 및 다운로드 함수 ====================
 /**
  * 현재 이미지 저장
@@ -878,7 +1255,13 @@ const currentImageInfo = computed(() => {
     :progress-percentage="progressPercentage"
     :image-list-length="imageList.length"
     :is-all-processed="isAllProcessed"
+    :labels-data="labelsData"
+    :labels-json-content="labelsJsonContent"
     @save="saveImage"
+    @save-label="saveLabel"
+    @download-labels="downloadLabelsJson"
+    @delete-label="deleteLabel"
+    @clear-labels="clearAllLabels"
     @reprocess="reprocessCurrentImage"
     @next="nextImage"
     @previous="previousImage"

@@ -1,7 +1,8 @@
 <script setup>
+import { ref } from 'vue'
 import ImageNavigation from './ImageNavigation.vue'
 
-defineProps({
+const props = defineProps({
   imageUrl: {
     type: String,
     default: null
@@ -21,17 +22,45 @@ defineProps({
   isAllProcessed: {
     type: Boolean,
     default: false
+  },
+  labelsData: {
+    type: Object,
+    default: () => ({})
+  },
+  labelsJsonContent: {
+    type: String,
+    default: '{}'
+  },
+  labelsFileHandle: {
+    type: Object,
+    default: null
   }
 })
 
 const emit = defineEmits([
   'save',
+  'save-label',
+  'download-labels',
+  'delete-label',
+  'clear-labels',
+  'show-file-info',
   'reprocess',
   'next',
   'previous',
   'reset',
   'download-all'
 ])
+
+const showLabelsPanel = ref(false)
+
+const copyLabelsJson = () => {
+  navigator.clipboard.writeText(props.labelsJsonContent).then(() => {
+    alert('JSON이 클립보드에 복사되었습니다!')
+  }).catch(err => {
+    console.error('복사 실패:', err)
+    alert('복사에 실패했습니다.')
+  })
+}
 </script>
 
 <template>
@@ -67,6 +96,12 @@ const emit = defineEmits([
       <div class="button-group">
         <button class="save-btn" @click="emit('save')">보정된 이미지 다운로드</button>
         <button 
+          class="label-btn" 
+          @click="emit('save-label')"
+        >
+          라벨 저장
+        </button>
+        <button 
           class="restart-btn" 
           @click="emit('reprocess')"
         >
@@ -93,6 +128,82 @@ const emit = defineEmits([
       <div class="completion-message" v-if="isAllProcessed && imageListLength > 1">
         <p class="completion-text">🎉 모든 이미지 처리가 완료되었습니다!</p>
         <button class="download-all-btn" @click="emit('download-all')">모든 이미지 다운로드</button>
+      </div>
+      
+      <!-- 라벨 관리 패널 -->
+      <div class="labels-panel">
+        <div class="labels-panel-header">
+          <h3 class="labels-panel-title">labels.json 관리</h3>
+          <button 
+            class="labels-toggle-btn" 
+            @click="showLabelsPanel = !showLabelsPanel"
+          >
+            {{ showLabelsPanel ? '숨기기' : '보기' }}
+          </button>
+        </div>
+        
+        <div v-if="showLabelsPanel" class="labels-panel-content">
+          <div class="labels-actions">
+            <button class="labels-download-btn" @click="emit('download-labels')">
+              {{ labelsFileHandle ? 'labels.json 저장 위치 설정' : 'labels.json 다운로드' }}
+            </button>
+            <button 
+              v-if="labelsFileHandle"
+              class="labels-file-status-btn"
+              @click="emit('show-file-info')"
+              title="현재 저장 위치 확인"
+            >
+              📁 저장 위치 설정됨
+            </button>
+            <button 
+              class="labels-clear-btn" 
+              @click="emit('clear-labels')"
+              :disabled="Object.keys(labelsData).length === 0"
+            >
+              모든 라벨 삭제
+            </button>
+          </div>
+          
+          <div class="labels-list" v-if="Object.keys(labelsData).length > 0">
+            <div 
+              v-for="(points, imageName) in labelsData" 
+              :key="imageName"
+              class="label-item"
+            >
+              <div class="label-item-header">
+                <span class="label-image-name">{{ imageName }}</span>
+                <button 
+                  class="label-delete-btn" 
+                  @click="emit('delete-label', imageName)"
+                  title="라벨 삭제"
+                >
+                  ×
+                </button>
+              </div>
+              <div class="label-points">
+                <div v-for="(coord, pointName) in points" :key="pointName" class="label-point">
+                  <span class="point-name">{{ pointName }}:</span>
+                  <span class="point-coord">[{{ coord[0].toFixed(2) }}, {{ coord[1].toFixed(2) }}]</span>
+                </div>
+              </div>
+            </div>
+          </div>
+          
+          <div v-else class="labels-empty">
+            저장된 라벨이 없습니다.
+          </div>
+          
+          <div class="labels-json-viewer">
+            <h4>labels.json 내용:</h4>
+            <pre class="labels-json-content">{{ labelsJsonContent }}</pre>
+            <button 
+              class="labels-copy-btn" 
+              @click="copyLabelsJson"
+            >
+              JSON 복사
+            </button>
+          </div>
+        </div>
       </div>
     </div>
 
@@ -283,6 +394,24 @@ const emit = defineEmits([
   box-shadow: 0 4px 12px rgba(255, 255, 255, 0.2);
 }
 
+.label-btn {
+  background-color: #8b5cf6;
+  color: #ffffff;
+  border: none;
+  padding: 0.875rem 2rem;
+  font-size: 1rem;
+  font-weight: 600;
+  border-radius: 8px;
+  cursor: pointer;
+  transition: all 0.3s ease;
+}
+
+.label-btn:hover {
+  background-color: #7c3aed;
+  transform: translateY(-2px);
+  box-shadow: 0 4px 12px rgba(139, 92, 246, 0.3);
+}
+
 .completion-message {
   margin-top: 2rem;
   padding: 2rem;
@@ -314,6 +443,207 @@ const emit = defineEmits([
 .download-all-btn:hover {
   transform: translateY(-2px);
   box-shadow: 0 4px 20px rgba(34, 197, 94, 0.4);
+}
+
+.labels-panel {
+  margin-top: 2rem;
+  width: 100%;
+  max-width: 800px;
+  background-color: #1e1e1e;
+  border-radius: 12px;
+  padding: 1.5rem;
+  border: 1px solid #333;
+}
+
+.labels-panel-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 1rem;
+}
+
+.labels-panel-title {
+  color: #ffffff;
+  font-size: 1.25rem;
+  font-weight: 600;
+  margin: 0;
+}
+
+.labels-toggle-btn {
+  background-color: #646cff;
+  color: #ffffff;
+  border: none;
+  padding: 0.5rem 1rem;
+  font-size: 0.9rem;
+  font-weight: 600;
+  border-radius: 6px;
+  cursor: pointer;
+  transition: all 0.3s ease;
+}
+
+.labels-toggle-btn:hover {
+  background-color: #535bf2;
+}
+
+.labels-panel-content {
+  margin-top: 1rem;
+}
+
+.labels-actions {
+  display: flex;
+  gap: 1rem;
+  margin-bottom: 1.5rem;
+  flex-wrap: wrap;
+}
+
+.labels-download-btn,
+.labels-clear-btn,
+.labels-copy-btn {
+  background-color: #22c55e;
+  color: #ffffff;
+  border: none;
+  padding: 0.625rem 1.25rem;
+  font-size: 0.9rem;
+  font-weight: 600;
+  border-radius: 6px;
+  cursor: pointer;
+  transition: all 0.3s ease;
+}
+
+.labels-download-btn:hover,
+.labels-copy-btn:hover {
+  background-color: #16a34a;
+}
+
+.labels-clear-btn {
+  background-color: #ef4444;
+}
+
+.labels-clear-btn:hover:not(:disabled) {
+  background-color: #dc2626;
+}
+
+.labels-clear-btn:disabled {
+  background-color: #666;
+  cursor: not-allowed;
+}
+
+.labels-list {
+  margin-bottom: 1.5rem;
+}
+
+.label-item {
+  background-color: #2a2a2a;
+  border-radius: 8px;
+  padding: 1rem;
+  margin-bottom: 1rem;
+  border: 1px solid #444;
+}
+
+.label-item-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 0.75rem;
+}
+
+.label-image-name {
+  color: #ffffff;
+  font-weight: 600;
+  font-size: 1rem;
+}
+
+.label-delete-btn {
+  background-color: #ef4444;
+  color: #ffffff;
+  border: none;
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+  cursor: pointer;
+  font-size: 1.2rem;
+  line-height: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: all 0.3s ease;
+}
+
+.label-delete-btn:hover {
+  background-color: #dc2626;
+  transform: scale(1.1);
+}
+
+.label-points {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 0.5rem;
+}
+
+.label-point {
+  color: #cccccc;
+  font-size: 0.9rem;
+}
+
+.point-name {
+  color: #8b5cf6;
+  font-weight: 600;
+  margin-right: 0.5rem;
+}
+
+.point-coord {
+  color: #ffffff;
+  font-family: 'Courier New', monospace;
+}
+
+.labels-empty {
+  text-align: center;
+  color: #888;
+  padding: 2rem;
+  font-style: italic;
+}
+
+.labels-json-viewer {
+  margin-top: 1.5rem;
+  padding-top: 1.5rem;
+  border-top: 1px solid #333;
+}
+
+.labels-json-viewer h4 {
+  color: #ffffff;
+  margin-bottom: 0.75rem;
+  font-size: 1rem;
+}
+
+.labels-json-content {
+  background-color: #1a1a1a;
+  color: #00ff00;
+  padding: 1rem;
+  border-radius: 6px;
+  overflow-x: auto;
+  font-family: 'Courier New', monospace;
+  font-size: 0.85rem;
+  line-height: 1.5;
+  max-height: 300px;
+  overflow-y: auto;
+  border: 1px solid #333;
+  margin-bottom: 0.75rem;
+}
+
+.labels-file-status-btn {
+  background-color: #22c55e;
+  color: #ffffff;
+  border: none;
+  padding: 0.625rem 1.25rem;
+  font-size: 0.9rem;
+  font-weight: 600;
+  border-radius: 6px;
+  cursor: pointer;
+  transition: all 0.3s ease;
+}
+
+.labels-file-status-btn:hover {
+  background-color: #16a34a;
 }
 
 .decoration {
