@@ -1,5 +1,7 @@
 # 이미지 보정 도구 (Image Correction Tool)
 
+3D 프린터 이미지 데이터 보정
+
 Vue.js 기반의 이미지 원근 보정(Perspective Correction) 웹 애플리케이션입니다.
 
 ## 주요 기능
