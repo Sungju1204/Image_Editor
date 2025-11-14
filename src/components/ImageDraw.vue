@@ -171,17 +171,16 @@ const handleCanvasMouseDown = (event) => {
       const line = props.lines[i]
       if (isPointOnLine(point, line)) {
         clickedOnLine = true
-        const selected = props.lines.find(l => l.id === (props.selectedLineId || grabbedLineId.value))
-        if (selected && selected.id === line.id) {
-          // 선택된 선 위를 클릭하면 드래그 시작
-          isDrawingLine.value = false
-          tempLineStart.value = null
-          tempLineType.value = null
-          draggingLine.value = selected.id
-          dragOffset.value = {
-            x: x - selected.start.x,
-            y: y - selected.start.y
-          }
+        const currentSelectedId = props.selectedLineId || grabbedLineId.value
+        if (currentSelectedId === line.id) {
+          // 같은 선을 다시 클릭하면 그랩 모드 해제 (토글)
+          isGrabMode.value = false
+          grabbedLineId.value = null
+          lastMousePos.value = null
+          hoveredLineId.value = null
+          emit('select-line', null)
+          if (wrapperRef.value) wrapperRef.value.style.cursor = 'crosshair'
+          redrawCanvas()
           return
         } else {
           // 다른 선을 클릭하면 그 선으로 그랩 모드 전환
