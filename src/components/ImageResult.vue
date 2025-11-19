@@ -1,4 +1,5 @@
 <script setup>
+import { computed } from 'vue'
 import ImageNavigation from './ImageNavigation.vue'
 
 defineProps({
@@ -32,6 +33,11 @@ const emit = defineEmits([
   'reset',
   'download-all'
 ])
+
+// Electron API 확인 (computed로 처리하여 반응성 유지)
+const isElectron = computed(() => {
+  return typeof window !== 'undefined' && window.electronAPI
+})
 </script>
 
 <template>
@@ -57,11 +63,28 @@ const emit = defineEmits([
         :src="imageUrl" 
         alt="보정된 이미지" 
         class="result-image"
-        @load="() => console.log('결과 이미지 로드 완료')"
-        @error="(e) => console.error('결과 이미지 로드 실패:', e, 'imageUrl:', imageUrl)"
+        @load="(e) => {
+          console.log('결과 이미지 로드 완료', {
+            naturalWidth: e.target.naturalWidth,
+            naturalHeight: e.target.naturalHeight,
+            width: e.target.width,
+            height: e.target.height,
+            imageUrlLength: imageUrl?.length
+          })
+        }"
+        @error="(e) => {
+          console.error('결과 이미지 로드 실패:', e, {
+            imageUrl: imageUrl,
+            imageUrlLength: imageUrl?.length,
+            imageUrlPrefix: imageUrl?.substring(0, 50)
+          })
+        }"
       />
       <div v-if="!imageUrl" style="color: red; padding: 2rem;">
         이미지가 로드되지 않았습니다. imageUrl: {{ imageUrl }}
+      </div>
+      <div v-else-if="imageUrl && imageUrl.length < 1000" style="color: orange; padding: 1rem; background: #2a2a2a; border-radius: 8px; margin-top: 1rem;">
+        ⚠️ 이미지 데이터가 너무 작습니다 ({{ imageUrl.length }} bytes). 이미지가 제대로 생성되지 않았을 수 있습니다.
       </div>
       
       <div class="button-group">
@@ -77,14 +100,14 @@ const emit = defineEmits([
           v-if="imageListLength > 1 && currentImageInfo.index < imageListLength"
           @click="emit('next')"
         >
-          다음 이미지 처리
+          {{ isAllProcessed ? '다음 결과 보기' : '다음 이미지 처리' }}
         </button>
         <button 
           class="prev-btn" 
           v-if="imageListLength > 1 && currentImageInfo.index > 1"
           @click="emit('previous')"
         >
-          이전 이미지
+          {{ isAllProcessed ? '이전 결과 보기' : '이전 이미지' }}
         </button>
         <button class="reset-btn-white" @click="emit('reset')">새 이미지로 다시 시작</button>
       </div>
@@ -92,7 +115,9 @@ const emit = defineEmits([
       <!-- 전체 완료 메시지 -->
       <div class="completion-message" v-if="isAllProcessed && imageListLength > 1">
         <p class="completion-text">🎉 모든 이미지 처리가 완료되었습니다!</p>
-        <button class="download-all-btn" @click="emit('download-all')">모든 이미지 다운로드</button>
+        <button class="download-all-btn" @click="emit('download-all')">
+          {{ isElectron ? '모든 이미지 폴더에 저장' : '모든 이미지 다운로드' }}
+        </button>
       </div>
     </div>
 

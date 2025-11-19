@@ -1,6 +1,7 @@
-import { app, BrowserWindow } from 'electron'
+import { app, BrowserWindow, dialog, ipcMain } from 'electron'
 import { fileURLToPath } from 'node:url'
 import path from 'node:path'
+import fs from 'fs/promises'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 
@@ -40,6 +41,58 @@ app.whenReady().then(() => {
 app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') {
     app.quit()
+  }
+})
+
+// IPC 핸들러 등록
+ipcMain.handle('select-folder', async () => {
+  const result = await dialog.showOpenDialog({
+    properties: ['openDirectory']
+  })
+  
+  if (!result.canceled && result.filePaths.length > 0) {
+    return result.filePaths[0]
+  }
+  return null
+})
+
+ipcMain.handle('save-file', async (event, filePath, data) => {
+  try {
+    // base64 데이터를 버퍼로 변환
+    const base64Data = data.replace(/^data:image\/\w+;base64,/, '')
+    const buffer = Buffer.from(base64Data, 'base64')
+    
+    // 파일 저장
+    await fs.writeFile(filePath, buffer)
+    return { success: true }
+  } catch (error) {
+    console.error('파일 저장 오류:', error)
+    return { success: false, error: error.message }
+  }
+})
+
+ipcMain.handle('save-files', async (event, folderPath, files) => {
+  try {
+    const results = []
+    
+    for (const file of files) {
+      try {
+        const filePath = path.join(folderPath, file.name)
+        const base64Data = file.data.replace(/^data:image\/\w+;base64,/, '')
+        const buffer = Buffer.from(base64Data, 'base64')
+        
+        await fs.writeFile(filePath, buffer)
+        results.push({ name: file.name, success: true })
+      } catch (error) {
+        console.error(`파일 ${file.name} 저장 오류:`, error)
+        results.push({ name: file.name, success: false, error: error.message })
+      }
+    }
+    
+    return { success: true, results }
+  } catch (error) {
+    console.error('파일 저장 오류:', error)
+    return { success: false, error: error.message }
   }
 })
 

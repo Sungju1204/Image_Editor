@@ -54,6 +54,22 @@ const props = defineProps({
   instruction: {
     type: String,
     default: ''
+  },
+  isBatchMode: {
+    type: Boolean,
+    default: false
+  },
+  isReadOnly: {
+    type: Boolean,
+    default: false
+  },
+  isProcessingAll: {
+    type: Boolean,
+    default: false
+  },
+  processingProgress: {
+    type: Object,
+    default: () => ({ current: 0, total: 0 })
   }
 })
 
@@ -66,7 +82,10 @@ const emit = defineEmits([
   'reset',
   'next',
   'previous',
-  'select-line'
+  'select-line',
+  'process-all',
+  'toggle-batch-mode',
+  'image-loaded'
 ])
 
 const canvasRef = ref(null)
@@ -109,6 +128,13 @@ watch(() => props.imageUrl, (newUrl) => {
         imageRef.value.onload = () => {
           requestAnimationFrame(() => {
             redrawCanvas()
+            // 이미지 로드 완료 이벤트 발생
+            if (props.isBatchMode && imageRef.value) {
+              emit('image-loaded', {
+                width: imageRef.value.naturalWidth || imageRef.value.width,
+                height: imageRef.value.naturalHeight || imageRef.value.height
+              })
+            }
           })
         }
         // 이미지 로드 실패 시에도 처리
@@ -240,6 +266,11 @@ const handleCanvasMouseDown = (event) => {
         return
       }
     }
+  }
+  
+  // 읽기 전용 모드에서는 선 그리기 불가
+  if (props.isReadOnly) {
+    return
   }
   
   // 선분 그리기 시작
@@ -593,15 +624,55 @@ const getLineIntersection = (line1, line2) => {
   const { start: p1, end: p2 } = line1
   const { start: p3, end: p4 } = line2
   
+  // 수평선과 수직선 교점 계산 최적화
+  if (line1.type === 'horizontal' && line2.type === 'vertical') {
+    // line1은 수평선 (y가 일정), line2는 수직선 (x가 일정)
+    const y = p1.y // 수평선의 y 좌표
+    const x = p3.x // 수직선의 x 좌표
+    
+    // 선분 범위 내에 있는지 확인
+    const hMinX = Math.min(p1.x, p2.x)
+    const hMaxX = Math.max(p1.x, p2.x)
+    const vMinY = Math.min(p3.y, p4.y)
+    const vMaxY = Math.max(p3.y, p4.y)
+    
+    if (x >= hMinX && x <= hMaxX && y >= vMinY && y <= vMaxY) {
+      return { x, y }
+    }
+    return null
+  } else if (line1.type === 'vertical' && line2.type === 'horizontal') {
+    // line1은 수직선 (x가 일정), line2는 수평선 (y가 일정)
+    const x = p1.x // 수직선의 x 좌표
+    const y = p3.y // 수평선의 y 좌표
+    
+    // 선분 범위 내에 있는지 확인
+    const vMinY = Math.min(p1.y, p2.y)
+    const vMaxY = Math.max(p1.y, p2.y)
+    const hMinX = Math.min(p3.x, p4.x)
+    const hMaxX = Math.max(p3.x, p4.x)
+    
+    if (x >= hMinX && x <= hMaxX && y >= vMinY && y <= vMaxY) {
+      return { x, y }
+    }
+    return null
+  }
+  
+  // 일반적인 경우: 기존 로직 사용
   const denom = (p1.x - p2.x) * (p3.y - p4.y) - (p1.y - p2.y) * (p3.x - p4.x)
-  if (Math.abs(denom) < 0.001) return null
+  if (Math.abs(denom) < 0.001) return null // 평행한 선분
   
   const t = ((p1.x - p3.x) * (p3.y - p4.y) - (p1.y - p3.y) * (p3.x - p4.x)) / denom
+  const s = ((p1.x - p3.x) * (p1.y - p2.y) - (p1.y - p3.y) * (p1.x - p2.x)) / denom
   
-  return {
-    x: p1.x + t * (p2.x - p1.x),
-    y: p1.y + t * (p2.y - p1.y)
+  // t와 s가 0~1 범위 내에 있어야 선분 위의 교점
+  if (t >= 0 && t <= 1 && s >= 0 && s <= 1) {
+    return {
+      x: p1.x + t * (p2.x - p1.x),
+      y: p1.y + t * (p2.y - p1.y)
+    }
   }
+  
+  return null
 }
 
 /**
@@ -690,15 +761,52 @@ defineExpose({
         @select="handleSelectLine"
       />
       
+      <div class="batch-mode-controls" v-if="imageListLength > 1">
+        <label class="batch-mode-toggle">
+          <input 
+            type="checkbox" 
+            :checked="isBatchMode"
+            @change="emit('toggle-batch-mode')"
+            :disabled="isProcessingAll"
+          />
+          <span>일괄 처리 모드</span>
+        </label>
+        <div class="batch-mode-info" v-if="isBatchMode">
+          <p class="batch-mode-text">
+            {{ currentImageInfo.index === 1 ? '첫 번째 이미지에 선을 그으면 모든 이미지에 동일한 좌표로 적용됩니다.' : '이 이미지는 읽기 전용입니다. 첫 번째 이미지로 이동하여 선을 그려주세요.' }}
+          </p>
+        </div>
+        <div class="processing-status" v-if="isProcessingAll">
+          <p class="processing-text">
+            처리 중: {{ processingProgress.current }} / {{ processingProgress.total }}
+          </p>
+          <div class="processing-bar">
+            <div 
+              class="processing-fill" 
+              :style="{ width: (processingProgress.current / processingProgress.total * 100) + '%' }"
+            ></div>
+          </div>
+        </div>
+      </div>
+      
       <div class="draw-buttons">
         <button 
+          v-if="!isBatchMode || (isBatchMode && currentImageInfo.index === 1)"
           class="complete-btn" 
           @click="emit('correction')" 
-          :disabled="lines.length !== 4"
+          :disabled="lines.length !== 4 || isProcessingAll"
         >
           보정 완료
         </button>
-        <button class="reset-btn" @click="emit('reset')">처음부터 다시</button>
+        <button 
+          v-if="isBatchMode && currentImageInfo.index === 1 && lines.length === 4"
+          class="process-all-btn" 
+          @click="emit('process-all')"
+          :disabled="isProcessingAll"
+        >
+          {{ isProcessingAll ? '처리 중...' : '모든 이미지 처리' }}
+        </button>
+        <button class="reset-btn" @click="emit('reset')" :disabled="isProcessingAll">처음부터 다시</button>
       </div>
       
       <ImageNavigation
@@ -892,6 +1000,102 @@ defineExpose({
   border-color: #888;
   color: #fff;
   background-color: #2a2a2a;
+}
+
+.batch-mode-controls {
+  width: 100%;
+  max-width: 800px;
+  margin-bottom: 1.5rem;
+  padding: 1rem;
+  background-color: #1e1e1e;
+  border-radius: 8px;
+  border: 1px solid #333;
+}
+
+.batch-mode-toggle {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  cursor: pointer;
+  color: #ffffff;
+  font-size: 1rem;
+  font-weight: 600;
+}
+
+.batch-mode-toggle input[type="checkbox"] {
+  width: 20px;
+  height: 20px;
+  cursor: pointer;
+  accent-color: #646cff;
+}
+
+.batch-mode-info {
+  margin-top: 0.75rem;
+  padding-top: 0.75rem;
+  border-top: 1px solid #333;
+}
+
+.batch-mode-text {
+  color: #888;
+  font-size: 0.875rem;
+  margin: 0;
+  line-height: 1.5;
+}
+
+.processing-status {
+  margin-top: 0.75rem;
+  padding-top: 0.75rem;
+  border-top: 1px solid #333;
+}
+
+.processing-text {
+  color: #646cff;
+  font-size: 0.875rem;
+  margin: 0 0 0.5rem 0;
+  font-weight: 600;
+}
+
+.processing-bar {
+  width: 100%;
+  height: 8px;
+  background-color: #2a2a2a;
+  border-radius: 4px;
+  overflow: hidden;
+}
+
+.processing-fill {
+  height: 100%;
+  background: linear-gradient(90deg, #646cff, #535bf2);
+  transition: width 0.3s ease;
+  border-radius: 4px;
+}
+
+.batch-mode-toggle input[type="checkbox"]:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.process-all-btn {
+  background: linear-gradient(135deg, #646cff, #535bf2);
+  color: #ffffff;
+  border: none;
+  padding: 0.875rem 2rem;
+  font-size: 1rem;
+  font-weight: 600;
+  border-radius: 8px;
+  cursor: pointer;
+  transition: all 0.3s ease;
+}
+
+.process-all-btn:hover:not(:disabled) {
+  transform: translateY(-2px);
+  box-shadow: 0 4px 12px rgba(100, 108, 255, 0.4);
+}
+
+.process-all-btn:disabled {
+  background: #444;
+  cursor: not-allowed;
+  opacity: 0.7;
 }
 
 .decoration {

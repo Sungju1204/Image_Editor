@@ -47,6 +47,14 @@ const imageList = ref([]) // 업로드된 모든 이미지 파일
 const currentImageIndex = ref(-1) // 현재 처리 중인 이미지 인덱스
 const processedImages = ref([]) // 처리 완료된 이미지들 (결과 URL 저장)
 
+// 일괄 처리 모드 관련 상태
+const isBatchMode = ref(false) // 일괄 처리 모드 활성화 여부
+const sharedLines = ref([]) // 공유된 선분 (첫 번째 이미지의 선분) - 화면 좌표 기준
+const baseImageDisplaySize = ref({ width: 0, height: 0 }) // 기준 이미지 화면 표시 크기 (첫 번째 이미지)
+const baseImageNaturalSize = ref({ width: 0, height: 0 }) // 기준 이미지 자연 크기 (첫 번째 이미지)
+const isProcessingAll = ref(false) // 모든 이미지 처리 중 여부
+const processingProgress = ref({ current: 0, total: 0 }) // 처리 진행 상황
+
 // ==================== 파일 업로드 관련 함수 ====================
 /**
  * 이미지 파일 리스트 초기화 및 처리 시작
@@ -66,6 +74,13 @@ const initializeImageList = (files) => {
     url: null,
     processedUrl: null
   }))
+  
+  // 여러 이미지가 있으면 자동으로 일괄 처리 모드 활성화
+  if (imageFiles.length > 1) {
+    isBatchMode.value = true
+  } else {
+    isBatchMode.value = false
+  }
   
   // 첫 번째 이미지로 시작
   currentImageIndex.value = 0
@@ -104,8 +119,34 @@ const startProcessingImage = (index) => {
   selectedFile.value = imageItem.file
   imageUrl.value = imageItem.url
   points.value = []
-  lines.value = [] // 선분 초기화
-  lineIdCounter.value = 0
+  
+  // 일괄 처리 모드인 경우
+  if (isBatchMode.value) {
+    if (index === 0) {
+      // 첫 번째 이미지: 선분 초기화하고 그리기 가능 (단, 이미 선분이 있으면 유지)
+      if (sharedLines.value.length === 0) {
+        // sharedLines가 비어있을 때만 초기화
+        lines.value = []
+        lineIdCounter.value = 0
+        baseImageDisplaySize.value = { width: 0, height: 0 }
+        baseImageNaturalSize.value = { width: 0, height: 0 }
+      } else {
+        // 이미 선분이 있으면 sharedLines를 lines에 복사
+        lines.value = [...sharedLines.value]
+      }
+    } else {
+      // 나머지 이미지: 공유된 선분을 현재 이미지 화면 크기에 맞게 조정
+      if (sharedLines.value.length > 0) {
+        lines.value = adjustLinesToDisplaySize(sharedLines.value, baseImageDisplaySize.value)
+      } else {
+        lines.value = []
+      }
+    }
+  } else {
+    // 일반 모드: 선분 초기화
+    lines.value = []
+    lineIdCounter.value = 0
+  }
   
   // 즉시 draw 단계로 전환 (이미지 로딩은 컴포넌트에서 처리)
   currentStep.value = 'draw'
@@ -119,6 +160,11 @@ const startProcessingImage = (index) => {
  */
 const handleLineAdded = (newLine) => {
   lines.value.push(newLine)
+  
+  // 일괄 처리 모드이고 첫 번째 이미지인 경우 공유 선분에 추가
+  if (isBatchMode.value && currentImageIndex.value === 0) {
+    sharedLines.value.push({ ...newLine })
+  }
 }
 
 /**
@@ -129,6 +175,14 @@ const handleLineUpdated = (updatedLine) => {
   if (index !== -1) {
     lines.value[index] = updatedLine
   }
+  
+  // 일괄 처리 모드이고 첫 번째 이미지인 경우 공유 선분도 업데이트
+  if (isBatchMode.value && currentImageIndex.value === 0) {
+    const sharedIndex = sharedLines.value.findIndex(l => l.id === updatedLine.id)
+    if (sharedIndex !== -1) {
+      sharedLines.value[sharedIndex] = { ...updatedLine }
+    }
+  }
 }
 
 /**
@@ -136,6 +190,11 @@ const handleLineUpdated = (updatedLine) => {
  */
 const handleLineDuplicated = (newLine) => {
   lines.value.push(newLine)
+  
+  // 일괄 처리 모드이고 첫 번째 이미지인 경우 공유 선분에 추가
+  if (isBatchMode.value && currentImageIndex.value === 0) {
+    sharedLines.value.push({ ...newLine })
+  }
 }
 
 /**
@@ -145,6 +204,14 @@ const handleLineDeleted = (lineId) => {
   const index = lines.value.findIndex(l => l.id === lineId)
   if (index !== -1) {
     lines.value.splice(index, 1)
+  }
+  
+  // 일괄 처리 모드이고 첫 번째 이미지인 경우 공유 선분도 삭제
+  if (isBatchMode.value && currentImageIndex.value === 0) {
+    const sharedIndex = sharedLines.value.findIndex(l => l.id === lineId)
+    if (sharedIndex !== -1) {
+      sharedLines.value.splice(sharedIndex, 1)
+    }
   }
 }
 
@@ -160,25 +227,68 @@ const getLineIntersection = (line1, line2) => {
   const { start: p1, end: p2 } = line1
   const { start: p3, end: p4 } = line2
   
+  // 수평선과 수직선 교점 계산 최적화
+  if (line1.type === 'horizontal' && line2.type === 'vertical') {
+    // line1은 수평선 (y가 일정), line2는 수직선 (x가 일정)
+    const y = p1.y // 수평선의 y 좌표
+    const x = p3.x // 수직선의 x 좌표
+    
+    // 선분 범위 내에 있는지 확인
+    const hMinX = Math.min(p1.x, p2.x)
+    const hMaxX = Math.max(p1.x, p2.x)
+    const vMinY = Math.min(p3.y, p4.y)
+    const vMaxY = Math.max(p3.y, p4.y)
+    
+    if (x >= hMinX && x <= hMaxX && y >= vMinY && y <= vMaxY) {
+      return { x, y }
+    }
+    return null
+  } else if (line1.type === 'vertical' && line2.type === 'horizontal') {
+    // line1은 수직선 (x가 일정), line2는 수평선 (y가 일정)
+    const x = p1.x // 수직선의 x 좌표
+    const y = p3.y // 수평선의 y 좌표
+    
+    // 선분 범위 내에 있는지 확인
+    const vMinY = Math.min(p1.y, p2.y)
+    const vMaxY = Math.max(p1.y, p2.y)
+    const hMinX = Math.min(p3.x, p4.x)
+    const hMaxX = Math.max(p3.x, p4.x)
+    
+    if (x >= hMinX && x <= hMaxX && y >= vMinY && y <= vMaxY) {
+      return { x, y }
+    }
+    return null
+  }
+  
+  // 일반적인 경우: 기존 로직 사용
   const denom = (p1.x - p2.x) * (p3.y - p4.y) - (p1.y - p2.y) * (p3.x - p4.x)
   if (Math.abs(denom) < 0.001) return null // 평행한 선분
   
   const t = ((p1.x - p3.x) * (p3.y - p4.y) - (p1.y - p3.y) * (p3.x - p4.x)) / denom
+  const s = ((p1.x - p3.x) * (p1.y - p2.y) - (p1.y - p3.y) * (p1.x - p2.x)) / denom
   
-  return {
-    x: p1.x + t * (p2.x - p1.x),
-    y: p1.y + t * (p2.y - p1.y)
+  // t와 s가 0~1 범위 내에 있어야 선분 위의 교점
+  if (t >= 0 && t <= 1 && s >= 0 && s <= 1) {
+    return {
+      x: p1.x + t * (p2.x - p1.x),
+      y: p1.y + t * (p2.y - p1.y)
+    }
   }
+  
+  return null
 }
 
 /**
  * 4개 선분의 교점 계산 (수평 2개, 수직 2개)
+ * @param {Array} linesToUse - 사용할 선분 배열 (선택적, 없으면 lines.value 사용)
  */
-const calculateIntersections = () => {
-  if (lines.value.length !== 4) return []
+const calculateIntersections = (linesToUse = null) => {
+  const currentLines = linesToUse || lines.value
   
-  const horizontalLines = lines.value.filter(l => l.type === 'horizontal')
-  const verticalLines = lines.value.filter(l => l.type === 'vertical')
+  if (currentLines.length !== 4) return []
+  
+  const horizontalLines = currentLines.filter(l => l.type === 'horizontal')
+  const verticalLines = currentLines.filter(l => l.type === 'vertical')
   
   if (horizontalLines.length !== 2 || verticalLines.length !== 2) return []
   
@@ -203,6 +313,237 @@ const calculateIntersections = () => {
   })
   
   return intersections
+}
+
+/**
+ * 4개 선분의 교점 계산 (linesToUse 필수)
+ * @param {Array} linesToUse - 사용할 선분 배열
+ */
+const calculateIntersectionsWithLines = (linesToUse) => {
+  return calculateIntersections(linesToUse)
+}
+
+/**
+ * 현재 처리에 사용할 이미지 요소 찾기
+ */
+const getProcessingImageElement = () => {
+  let img = null
+  if (imageDrawRef.value?.imageRef) {
+    const ref = imageDrawRef.value.imageRef
+    if (typeof ref === 'object' && ref !== null && 'value' in ref) {
+      img = ref.value
+    } else {
+      img = ref
+    }
+  }
+
+  if (!img) {
+    img = imageRef.value
+  }
+
+  return img
+}
+
+/**
+ * 선분을 실제 이미지 좌표계의 교점으로 변환
+ */
+const convertLinesToImageCorners = (linesSource, imgElement) => {
+  if (!imgElement) return null
+
+  const currentLines = linesSource || lines.value
+  const rawCorners = calculateIntersectionsWithLines(currentLines)
+  const corners = orderCornersClockwise(rawCorners)
+
+  if (!corners || corners.length !== 4) {
+    return null
+  }
+
+  const imgDisplayWidth = imgElement.offsetWidth || imgElement.width
+  const imgDisplayHeight = imgElement.offsetHeight || imgElement.height
+  const imgNaturalWidth = imgElement.naturalWidth || imgElement.width
+  const imgNaturalHeight = imgElement.naturalHeight || imgElement.height
+
+  if (imgDisplayWidth === 0 || imgDisplayHeight === 0) {
+    return null
+  }
+
+  let imgOffsetX = 0
+  let imgOffsetY = 0
+  const wrapper = imageDrawRef.value?.$el?.querySelector?.('.image-wrapper')
+  if (wrapper) {
+    const wrapperRect = wrapper.getBoundingClientRect()
+    const imgRect = imgElement.getBoundingClientRect()
+    imgOffsetX = imgRect.left - wrapperRect.left
+    imgOffsetY = imgRect.top - wrapperRect.top
+  }
+
+  if (imgOffsetX === 0 && imgOffsetY === 0) {
+    imgOffsetX = 20
+    imgOffsetY = 20
+  }
+
+  const scaleX = imgNaturalWidth / imgDisplayWidth
+  const scaleY = imgNaturalHeight / imgDisplayHeight
+
+  const cornersInImage = corners.map((corner) => {
+    const relativeX = corner.x - imgOffsetX
+    const relativeY = corner.y - imgOffsetY
+    const clampedX = Math.max(0, Math.min(relativeX, imgDisplayWidth))
+    const clampedY = Math.max(0, Math.min(relativeY, imgDisplayHeight))
+    return {
+      x: clampedX * scaleX,
+      y: clampedY * scaleY
+    }
+  })
+
+  return {
+    cornersInImage,
+    meta: {
+      imgDisplayWidth,
+      imgDisplayHeight,
+      imgNaturalWidth,
+      imgNaturalHeight,
+      scaleX,
+      scaleY,
+      imgOffsetX,
+      imgOffsetY
+    }
+  }
+}
+
+/**
+ * 코너 정보를 기반으로 출력 사이즈와 크롭 영역 계산
+ */
+const calculateCropMetrics = (cornersInImage, imgNaturalWidth, imgNaturalHeight) => {
+  const w1 = Math.sqrt(Math.pow(cornersInImage[1].x - cornersInImage[0].x, 2) + Math.pow(cornersInImage[1].y - cornersInImage[0].y, 2))
+  const w2 = Math.sqrt(Math.pow(cornersInImage[2].x - cornersInImage[3].x, 2) + Math.pow(cornersInImage[2].y - cornersInImage[3].y, 2))
+  const h1 = Math.sqrt(Math.pow(cornersInImage[3].x - cornersInImage[0].x, 2) + Math.pow(cornersInImage[3].y - cornersInImage[0].y, 2))
+  const h2 = Math.sqrt(Math.pow(cornersInImage[2].x - cornersInImage[1].x, 2) + Math.pow(cornersInImage[2].y - cornersInImage[1].y, 2))
+
+  const avgWidth = (w1 + w2) / 2
+  const avgHeight = (h1 + h2) / 2
+  const avgSize = (avgWidth + avgHeight) / 2
+  const minSize = Math.max(imgNaturalWidth, imgNaturalHeight) * 0.3
+  const width = Math.max(avgSize || minSize, minSize, 300)
+  const height = Math.max(avgSize || minSize, minSize, 300)
+
+  const allX = cornersInImage.map((point) => point.x)
+  const allY = cornersInImage.map((point) => point.y)
+
+  const minX = Math.max(0, Math.floor(Math.min(...allX) - 1))
+  const maxX = Math.min(imgNaturalWidth, Math.ceil(Math.max(...allX) + 1))
+  const minY = Math.max(0, Math.floor(Math.min(...allY) - 1))
+  const maxY = Math.min(imgNaturalHeight, Math.ceil(Math.max(...allY) + 1))
+
+  const cropWidth = maxX - minX
+  const cropHeight = maxY - minY
+
+  return {
+    width,
+    height,
+    minX,
+    minY,
+    cropWidth,
+    cropHeight
+  }
+}
+
+/**
+ * 주어진 이미지와 코너로 크롭/리사이즈 수행
+ */
+const cropImageWithCorners = (imgElement, cornersInImage) => {
+  const imgNaturalWidth = imgElement.naturalWidth || imgElement.width
+  const imgNaturalHeight = imgElement.naturalHeight || imgElement.height
+  const metrics = calculateCropMetrics(cornersInImage, imgNaturalWidth, imgNaturalHeight)
+
+  if (metrics.cropWidth <= 0 || metrics.cropHeight <= 0) {
+    throw new Error('Invalid crop area: ' + JSON.stringify(metrics))
+  }
+
+  const canvas = document.createElement('canvas')
+  canvas.width = metrics.width
+  canvas.height = metrics.height
+  const ctx = canvas.getContext('2d')
+
+  ctx.fillStyle = COLORS.BACKGROUND
+  ctx.fillRect(0, 0, metrics.width, metrics.height)
+  ctx.drawImage(
+    imgElement,
+    metrics.minX,
+    metrics.minY,
+    metrics.cropWidth,
+    metrics.cropHeight,
+    0,
+    0,
+    metrics.width,
+    metrics.height
+  )
+
+  return canvas.toDataURL('image/png')
+}
+
+/**
+ * 파일에서 이미지를 비동기로 로드
+ */
+const loadImageFromFile = (file) => {
+  return new Promise((resolve, reject) => {
+    if (!file) {
+      reject(new Error('파일이 없습니다.'))
+      return
+    }
+
+    const img = new Image()
+    img.onload = () => {
+      URL.revokeObjectURL(img.src)
+      resolve(img)
+    }
+    img.onerror = (error) => {
+      URL.revokeObjectURL(img.src)
+      reject(error)
+    }
+    img.src = URL.createObjectURL(file)
+  })
+}
+
+/**
+ * 교점 4개를 시계 방향(좌상 → 우상 → 우하 → 좌하)으로 정렬
+ */
+const orderCornersClockwise = (points) => {
+  if (!points || points.length !== 4) return points
+  
+  // 중심점 계산
+  const center = points.reduce((acc, point) => ({
+    x: acc.x + point.x,
+    y: acc.y + point.y
+  }), { x: 0, y: 0 })
+  center.x /= points.length
+  center.y /= points.length
+  
+  // 각도 기준 정렬 (atan2 결과: -π ~ π, 시계 방향)
+  const ordered = [...points].sort((a, b) => {
+    const angleA = Math.atan2(a.y - center.y, a.x - center.x)
+    const angleB = Math.atan2(b.y - center.y, b.x - center.x)
+    return angleA - angleB
+  })
+  
+  // 시작점을 좌상단 (x + y가 가장 작은 점)으로 맞추기 위해 rotate
+  let startIndex = 0
+  let minSum = Infinity
+  ordered.forEach((point, index) => {
+    const sum = point.x + point.y
+    if (sum < minSum) {
+      minSum = sum
+      startIndex = index
+    }
+  })
+  
+  const rotated = []
+  for (let i = 0; i < ordered.length; i++) {
+    rotated.push(ordered[(startIndex + i) % ordered.length])
+  }
+  
+  // 현재 정렬은 좌상 → 우상 → 우하 → 좌하
+  return rotated
 }
 
 // ==================== 이미지 보정 관련 함수 ====================
@@ -287,29 +628,14 @@ const handleCorrection = () => {
 
 /**
  * 원근 변환 적용
+ * @param {Array} linesToUse - 사용할 선분 배열 (선택적, 없으면 lines.value 사용)
  */
-const applyPerspectiveTransform = () => {
-  console.log('보정 시작, 선분 개수:', lines.value.length)
-  const canvas = document.createElement('canvas')
-  const ctx = canvas.getContext('2d')
+const applyPerspectiveTransform = (linesToUse = null) => {
+  // linesToUse가 제공되지 않으면 기본값으로 lines.value 사용
+  const currentLines = linesToUse || lines.value
   
-  // ImageDraw 컴포넌트의 imageRef 사용
-  // imageRef가 RefImpl이면 .value로, 이미 unwrapped면 직접 사용
-  let img = null
-  if (imageDrawRef.value?.imageRef) {
-    // RefImpl인지 확인 (value 속성이 있고 함수가 아닌 경우)
-    if (typeof imageDrawRef.value.imageRef === 'object' && 'value' in imageDrawRef.value.imageRef) {
-      img = imageDrawRef.value.imageRef.value
-    } else {
-      // 이미 unwrapped된 경우
-      img = imageDrawRef.value.imageRef
-    }
-  }
-  
-  // 폴백: App.vue의 imageRef 사용
-  if (!img) {
-    img = imageRef.value
-  }
+  console.log('보정 시작, 선분 개수:', currentLines.length)
+  const img = getProcessingImageElement()
   
   console.log('applyPerspectiveTransform 이미지 찾기:', {
     imageDrawRef: imageDrawRef.value,
@@ -324,394 +650,21 @@ const applyPerspectiveTransform = () => {
     console.error('이미지가 없습니다')
     return
   }
-  
-  // 실제 이미지 원본 크기
-  const imgNaturalWidth = img.naturalWidth || img.width
-  const imgNaturalHeight = img.naturalHeight || img.height
-  const imgDisplayWidth = img.offsetWidth
-  const imgDisplayHeight = img.offsetHeight
-  
-  // 크기 비율 계산
-  const scaleX = imgNaturalWidth / imgDisplayWidth
-  const scaleY = imgNaturalHeight / imgDisplayHeight
-  
-  console.log('이미지 크기:', { 
-    natural: { width: imgNaturalWidth, height: imgNaturalHeight },
-    display: { width: imgDisplayWidth, height: imgDisplayHeight },
-    scale: { x: scaleX, y: scaleY }
-  })
-  
-  // 교점 계산 (화면 좌표)
-  const corners = calculateIntersections()
-  if (corners.length !== 4) {
-    console.error('교점이 4개가 아닙니다:', corners.length)
-    alert('4개의 교점을 계산할 수 없습니다. 선분을 다시 확인해주세요.')
+
+  const conversion = convertLinesToImageCorners(currentLines, img)
+
+  if (!conversion) {
+    console.error('교점을 계산할 수 없습니다. 선분:', currentLines)
+    alert('4개의 교점을 계산할 수 없습니다. 수평선 2개와 수직선 2개가 교차하는지 확인해주세요.')
     return
   }
-  
-  console.log('교점 (화면 좌표):', corners)
-  
-  // 이미지 wrapper의 패딩 고려 (ImageDraw.vue에서 padding: 20px 사용)
-  const wrapperPadding = 20
-  
-  // 교점을 실제 이미지 좌표로 변환 (패딩 제거)
-  const cornersInImage = corners.map(corner => ({
-    x: (corner.x - wrapperPadding) * scaleX,
-    y: (corner.y - wrapperPadding) * scaleY
-  }))
-  
-  console.log('교점 (이미지 좌표):', cornersInImage)
-  
-  // 출력 크기 계산 (교점 간 거리 기반 - 이미지 좌표 기준)
-  const w1 = Math.sqrt(Math.pow(cornersInImage[1].x - cornersInImage[0].x, 2) + Math.pow(cornersInImage[1].y - cornersInImage[0].y, 2))
-  const w2 = Math.sqrt(Math.pow(cornersInImage[2].x - cornersInImage[3].x, 2) + Math.pow(cornersInImage[2].y - cornersInImage[3].y, 2))
-  const h1 = Math.sqrt(Math.pow(cornersInImage[3].x - cornersInImage[0].x, 2) + Math.pow(cornersInImage[3].y - cornersInImage[0].y, 2))
-  const h2 = Math.sqrt(Math.pow(cornersInImage[2].x - cornersInImage[1].x, 2) + Math.pow(cornersInImage[2].y - cornersInImage[1].y, 2))
-  
-  // 평균 크기 계산
-  const avgWidth = (w1 + w2) / 2
-  const avgHeight = (h1 + h2) / 2
-  
-  // 정사각형으로 만들기
-  const avgSize = (avgWidth + avgHeight) / 2
-  const width = Math.max(avgSize || 500, 100)
-  const height = Math.max(avgSize || 500, 100)
-  
-  console.log('출력 크기:', width, 'x', height)
-  
-  canvas.width = width
-  canvas.height = height
-  
-  // 실제 보정 적용
-  try {
-    console.log('보정 시작')
-    
-    // 원근 변환을 위한 소스 포인트 (이미지 좌표 기준)
-    const srcPoints = [
-      cornersInImage[0].x, cornersInImage[0].y, // 좌상
-      cornersInImage[1].x, cornersInImage[1].y, // 우상
-      cornersInImage[2].x, cornersInImage[2].y, // 우하
-      cornersInImage[3].x, cornersInImage[3].y  // 좌하
-    ]
-    
-    // 목적지 포인트 (정사각형)
-    const dstPoints = [
-      0, 0,           // 좌상
-      width, 0,       // 우상
-      width, height,  // 우하
-      0, height      // 좌하
-    ]
-    
-    console.log('소스 포인트:', srcPoints)
-    console.log('목적지 포인트:', dstPoints)
-    
-    // Homography 행렬 계산
-    const H = getPerspectiveMatrix(srcPoints, dstPoints)
-    console.log('Homography 행렬:', H)
-    
-    // 원근 변환 적용
-    ctx.fillStyle = COLORS.BACKGROUND
-    ctx.fillRect(0, 0, width, height)
-    
-      // 교점들이 만드는 사각형의 경계를 정확히 계산
-    // 교점들은 이미 좌상, 우상, 우하, 좌하 순서로 정렬되어 있음
-    const topLeft = cornersInImage[0]    // 좌상
-    const topRight = cornersInImage[1]   // 우상
-    const bottomRight = cornersInImage[2] // 우하
-    const bottomLeft = cornersInImage[3]  // 좌하
-    
-    // 교점들의 x, y 좌표를 모두 수집하여 경계 상자 계산
-    const allX = [topLeft.x, topRight.x, bottomRight.x, bottomLeft.x]
-    const allY = [topLeft.y, topRight.y, bottomRight.y, bottomLeft.y]
-    
-    // 경계 상자 계산 (이미지 범위 내로 제한하되, 교점들이 만드는 영역을 모두 포함)
-    // Math.floor/ceil 대신 약간의 여유를 두어 교점 영역을 완전히 포함
-    const minX = Math.max(0, Math.floor(Math.min(...allX) - 1))
-    const maxX = Math.min(imgNaturalWidth, Math.ceil(Math.max(...allX) + 1))
-    const minY = Math.max(0, Math.floor(Math.min(...allY) - 1))
-    const maxY = Math.min(imgNaturalHeight, Math.ceil(Math.max(...allY) + 1))
-    
-    const cropWidth = maxX - minX
-    const cropHeight = maxY - minY
-    
-    console.log('교점 좌표 (이미지):', cornersInImage)
-    console.log('크롭 영역:', { minX, minY, maxX, maxY, cropWidth, cropHeight, width, height })
-    console.log('이미지 크기:', { naturalWidth: imgNaturalWidth, naturalHeight: imgNaturalHeight })
-    
-    // 크롭 방식 사용 (안정적이고 빠름)
-    if (cropWidth > 0 && cropHeight > 0) {
-      // 교점으로 둘러싸인 사각형 영역을 정사각형으로 스케일
-      ctx.clearRect(0, 0, width, height)
-      ctx.fillStyle = COLORS.BACKGROUND
-      ctx.fillRect(0, 0, width, height)
-      ctx.drawImage(img, minX, minY, cropWidth, cropHeight, 0, 0, width, height)
-      const dataUrl = canvas.toDataURL('image/png')
-      imageUrl.value = dataUrl
-      console.log('크롭 방식 완료, 데이터 URL 길이:', dataUrl.length)
-    } else {
-      throw new Error('Invalid crop area: ' + JSON.stringify({ minX, minY, maxX, maxY, cropWidth, cropHeight }))
-    }
-  } catch (error) {
-    console.error('보정 중 오류:', error)
-    alert('이미지 보정 중 오류가 발생했습니다: ' + error.message)
-    // 오류 발생 시 전체 이미지 표시
-    ctx.drawImage(img, 0, 0, width, height)
-    imageUrl.value = canvas.toDataURL('image/png')
-  }
-}
 
-/**
- * Homography 행렬 계산
- */
-const getPerspectiveMatrix = (src, dst) => {
-  // 8개의 방정식으로 homography 행렬 계산
-  const A = []
-  const b = []
-  
-  for (let i = 0; i < 4; i++) {
-    const x = src[i * 2]
-    const y = src[i * 2 + 1]
-    const u = dst[i * 2]
-    const v = dst[i * 2 + 1]
-    
-    A.push([x, y, 1, 0, 0, 0, -u * x, -u * y])
-    A.push([0, 0, 0, x, y, 1, -v * x, -v * y])
-    b.push(u)
-    b.push(v)
-  }
-  
-  // 행렬 해결 (간단한 Gauss-Jordan 제거)
-  const h = solveLinearSystem(A, b)
-  
-  return [
-    h[0], h[1], h[2],
-    h[3], h[4], h[5],
-    h[6], h[7], 1
-  ]
-}
+  const dataUrl = cropImageWithCorners(img, conversion.cornersInImage)
+  imageUrl.value = dataUrl
+  console.log('이미지 변환 완료, 데이터 URL 길이:', dataUrl.length)
 
-/**
- * 선형 방정식 시스템 해결
- */
-const solveLinearSystem = (A, b) => {
-  // 간단한 8x8 행렬 해결
-  const n = A.length
-  const augmented = A.map((row, i) => [...row, b[i]])
-  
-  // Forward elimination
-  for (let i = 0; i < n; i++) {
-    let maxRow = i
-    for (let k = i + 1; k < n; k++) {
-      if (Math.abs(augmented[k][i]) > Math.abs(augmented[maxRow][i])) {
-        maxRow = k
-      }
-    }
-    [augmented[i], augmented[maxRow]] = [augmented[maxRow], augmented[i]]
-    
-    for (let k = i + 1; k < n; k++) {
-      const factor = augmented[k][i] / augmented[i][i]
-      for (let j = i; j < n + 1; j++) {
-        augmented[k][j] -= factor * augmented[i][j]
-      }
-    }
-  }
-  
-  // Back substitution
-  const x = new Array(n).fill(0)
-  for (let i = n - 1; i >= 0; i--) {
-    x[i] = augmented[i][n]
-    for (let j = i + 1; j < n; j++) {
-      x[i] -= augmented[i][j] * x[j]
-    }
-    x[i] /= augmented[i][i]
-  }
-  
-  return x
-}
-
-/**
- * 원근 변환 픽셀 단위 적용
- */
-const applyPerspective = (ctx, img, H, width, height, imgWidth, imgHeight) => {
-  console.log('applyPerspective 시작:', { width, height, imgWidth, imgHeight, H })
-  
-  // 이미지가 완전히 로드되었는지 확인
-  if (!img.complete) {
-    console.warn('이미지가 아직 로드되지 않았습니다')
-  }
-  
-  try {
-    const resultData = ctx.createImageData(width, height)
-    
-    // 실제 이미지 데이터 가져오기
-    const tempCanvas = document.createElement('canvas')
-    tempCanvas.width = imgWidth
-    tempCanvas.height = imgHeight
-    const tempCtx = tempCanvas.getContext('2d')
-    
-    // 이미지 그리기
-    tempCtx.drawImage(img, 0, 0, imgWidth, imgHeight)
-    const imageData = tempCtx.getImageData(0, 0, imgWidth, imgHeight)
-    
-    console.log('이미지 데이터 로드 완료:', imageData.data.length, '픽셀', '크기:', imgWidth, 'x', imgHeight)
-    
-    let filledPixels = 0
-    let skippedPixels = 0
-    
-    // 원근 변환 적용 - 순방향 변환 사용 (입력 -> 출력)
-    // 입력 이미지의 각 픽셀을 출력 이미지로 변환
-    for (let srcY = 0; srcY < imgHeight; srcY++) {
-      for (let srcX = 0; srcX < imgWidth; srcX++) {
-        // 순방향 변환: 입력 좌표 -> 출력 좌표
-        const denom = H[6] * srcX + H[7] * srcY + H[8]
-        if (Math.abs(denom) < 0.0001) {
-          skippedPixels++
-          continue
-        }
-        
-        const dstX = (H[0] * srcX + H[1] * srcY + H[2]) / denom
-        const dstY = (H[3] * srcX + H[4] * srcY + H[5]) / denom
-        
-        // 출력 좌표가 범위 내인지 확인
-        if (dstX >= 0 && dstX < width && dstY >= 0 && dstY < height) {
-          const x = Math.floor(dstX)
-          const y = Math.floor(dstY)
-          
-          if (x >= 0 && x < width && y >= 0 && y < height) {
-            // 픽셀 복사
-            const srcIdx = (srcY * imgWidth + srcX) * 4
-            const dstIdx = (y * width + x) * 4
-            
-            resultData.data[dstIdx] = imageData.data[srcIdx]
-            resultData.data[dstIdx + 1] = imageData.data[srcIdx + 1]
-            resultData.data[dstIdx + 2] = imageData.data[srcIdx + 2]
-            resultData.data[dstIdx + 3] = imageData.data[srcIdx + 3]
-            filledPixels++
-          }
-        }
-      }
-    }
-    
-    console.log('순방향 변환 완료, 채워진 픽셀:', filledPixels, '건너뛴 픽셀:', skippedPixels)
-    
-    // 역변환으로 빈 공간 채우기 (보완)
-    for (let y = 0; y < height; y++) {
-      for (let x = 0; x < width; x++) {
-        // 이미 채워진 픽셀은 건너뛰기
-        const idx = (y * width + x) * 4
-        if (resultData.data[idx + 3] > 0) {
-          continue
-        }
-        
-        // 역변환: 출력 좌표 -> 입력 좌표
-        const denom = H[6] * x + H[7] * y + H[8]
-        if (Math.abs(denom) < 0.001) {
-          continue
-        }
-        
-        const srcX = (H[0] * x + H[1] * y + H[2]) / denom
-        const srcY = (H[3] * x + H[4] * y + H[5]) / denom
-        
-        // 범위 체크를 완화하여 경계 픽셀도 처리
-        if (srcX >= -1 && srcX < imgWidth + 1 && srcY >= -1 && srcY < imgHeight + 1) {
-          // Bilinear interpolation
-          const x1 = Math.floor(srcX)
-          const y1 = Math.floor(srcY)
-          const x2 = Math.min(x1 + 1, imgWidth - 1)
-          const y2 = Math.min(y1 + 1, imgHeight - 1)
-          
-          const fx = srcX - x1
-          const fy = srcY - y1
-          
-          const getPixel = (px, py) => {
-            // 경계를 넘어가면 가장자리 픽셀 사용
-            const safeX = Math.max(0, Math.min(px, imgWidth - 1))
-            const safeY = Math.max(0, Math.min(py, imgHeight - 1))
-            const idx = (safeY * imgWidth + safeX) * 4
-            return [
-              imageData.data[idx],
-              imageData.data[idx + 1],
-              imageData.data[idx + 2],
-              imageData.data[idx + 3]
-            ]
-          }
-          
-          const p11 = getPixel(x1, y1)
-          const p21 = getPixel(x2, y1)
-          const p12 = getPixel(x1, y2)
-          const p22 = getPixel(x2, y2)
-          
-          const p1 = [
-            p11[0] * (1 - fx) + p21[0] * fx,
-            p11[1] * (1 - fx) + p21[1] * fx,
-            p11[2] * (1 - fx) + p21[2] * fx,
-            p11[3] * (1 - fx) + p21[3] * fx
-          ]
-          
-          const p2 = [
-            p12[0] * (1 - fx) + p22[0] * fx,
-            p12[1] * (1 - fx) + p22[1] * fx,
-            p12[2] * (1 - fx) + p22[2] * fx,
-            p12[3] * (1 - fx) + p22[3] * fx
-          ]
-          
-          const result = [
-            Math.round(p1[0] * (1 - fy) + p2[0] * fy),
-            Math.round(p1[1] * (1 - fy) + p2[1] * fy),
-            Math.round(p1[2] * (1 - fy) + p2[2] * fy),
-            Math.round(p1[3] * (1 - fy) + p2[3] * fy)
-          ]
-          
-          const idx = (y * width + x) * 4
-          resultData.data[idx] = result[0]
-          resultData.data[idx + 1] = result[1]
-          resultData.data[idx + 2] = result[2]
-          resultData.data[idx + 3] = result[3]
-          filledPixels++
-        } else {
-          // 범위를 벗어난 픽셀은 검은색으로 처리
-          const idx = (y * width + x) * 4
-          resultData.data[idx] = 0
-          resultData.data[idx + 1] = 0
-          resultData.data[idx + 2] = 0
-          resultData.data[idx + 3] = 255
-        }
-      }
-    }
-    
-    console.log('채워진 픽셀 수:', filledPixels, '/', width * height)
-    console.log('resultData 크기:', resultData.width, 'x', resultData.height)
-    
-    // 이미지 데이터 검증: 실제로 픽셀이 그려졌는지 확인
-    let nonTransparentPixels = 0
-    let nonBlackPixels = 0
-    for (let i = 0; i < resultData.data.length; i += 4) {
-      const alpha = resultData.data[i + 3]
-      if (alpha > 0) {
-        nonTransparentPixels++
-        const r = resultData.data[i]
-        const g = resultData.data[i + 1]
-        const b = resultData.data[i + 2]
-        if (r > 10 || g > 10 || b > 10) {
-          nonBlackPixels++
-        }
-      }
-    }
-    console.log('비투명 픽셀:', nonTransparentPixels, '비검은색 픽셀:', nonBlackPixels)
-    
-    ctx.putImageData(resultData, 0, 0)
-    console.log('이미지 데이터 적용 완료')
-    
-    // 캔버스 크기 확인
-    console.log('캔버스 크기:', ctx.canvas.width, 'x', ctx.canvas.height)
-    
-    // 캔버스 내용 확인을 위한 테스트 그리기
-    if (nonBlackPixels < 100) {
-      console.warn('경고: 거의 모든 픽셀이 검은색이거나 투명합니다. 원근 변환이 제대로 작동하지 않았을 수 있습니다.')
-    }
-  } catch (error) {
-    console.error('applyPerspective 오류:', error)
-    throw error
+  if (dataUrl.length < CONSTANTS.MIN_DATA_URL_LENGTH) {
+    console.warn('⚠️ 생성된 이미지 데이터가 너무 작습니다. 크롭 영역을 확인해주세요.')
   }
 }
 
@@ -736,6 +689,12 @@ const resetProcess = () => {
   imageList.value = []
   currentImageIndex.value = -1
   processedImages.value = []
+  isBatchMode.value = false
+  sharedLines.value = []
+  baseImageDisplaySize.value = { width: 0, height: 0 }
+  baseImageNaturalSize.value = { width: 0, height: 0 }
+  isProcessingAll.value = false
+  processingProgress.value = { current: 0, total: 0 }
 }
 
 /**
@@ -743,7 +702,11 @@ const resetProcess = () => {
  */
 const nextImage = () => {
   if (currentImageIndex.value < imageList.value.length - 1) {
-    startProcessingImage(currentImageIndex.value + 1)
+    const nextIndex = currentImageIndex.value + 1
+    if (showProcessedResult(nextIndex)) {
+      return
+    }
+    startProcessingImage(nextIndex)
   }
 }
 
@@ -752,7 +715,11 @@ const nextImage = () => {
  */
 const previousImage = () => {
   if (currentImageIndex.value > 0) {
-    startProcessingImage(currentImageIndex.value - 1)
+    const prevIndex = currentImageIndex.value - 1
+    if (showProcessedResult(prevIndex)) {
+      return
+    }
+    startProcessingImage(prevIndex)
   }
 }
 
@@ -761,6 +728,224 @@ const previousImage = () => {
  */
 const reprocessCurrentImage = () => {
   startProcessingImage(currentImageIndex.value)
+}
+
+/**
+ * 이미 처리된 이미지 결과를 화면에 표시
+ */
+const showProcessedResult = (index) => {
+  if (index < 0 || index >= imageList.value.length) return false
+  const processedUrl = imageList.value[index]?.processedUrl
+  if (!processedUrl) return false
+
+  currentImageIndex.value = index
+  imageUrl.value = processedUrl
+  currentStep.value = 'result'
+  return true
+}
+
+/**
+ * 선분을 화면 표시 크기에 맞게 조정 (화면 좌표 기준)
+ */
+const adjustLinesToDisplaySize = (sourceLines, sourceDisplaySize, targetDisplaySize = null) => {
+  if (!targetDisplaySize) {
+    // targetDisplaySize가 없으면 현재 이미지 화면 크기 사용
+    if (!imageDrawRef.value?.imageRef) return sourceLines
+    
+    let img = null
+    if (imageDrawRef.value.imageRef) {
+      if (typeof imageDrawRef.value.imageRef === 'object' && 'value' in imageDrawRef.value.imageRef) {
+        img = imageDrawRef.value.imageRef.value
+      } else {
+        img = imageDrawRef.value.imageRef
+      }
+    }
+    
+    if (!img || !img.complete) return sourceLines
+    
+    targetDisplaySize = {
+      width: img.offsetWidth || img.width,
+      height: img.offsetHeight || img.height
+    }
+  }
+  
+  if (sourceDisplaySize.width === 0 || sourceDisplaySize.height === 0) return sourceLines
+  
+  const scaleX = targetDisplaySize.width / sourceDisplaySize.width
+  const scaleY = targetDisplaySize.height / sourceDisplaySize.height
+  
+  return sourceLines.map(line => ({
+    ...line,
+    start: {
+      x: line.start.x * scaleX,
+      y: line.start.y * scaleY
+    },
+    end: {
+      x: line.end.x * scaleX,
+      y: line.end.y * scaleY
+    }
+  }))
+}
+
+/**
+ * 기준 이미지 크기 저장 (첫 번째 이미지 로드 시) - 화면 표시 크기와 자연 크기 모두 저장
+ */
+const saveBaseImageSize = (size = null) => {
+  if (size) {
+    baseImageNaturalSize.value = size
+    return
+  }
+  
+  if (!imageDrawRef.value?.imageRef) return
+  
+  let img = null
+  if (imageDrawRef.value.imageRef) {
+    if (typeof imageDrawRef.value.imageRef === 'object' && 'value' in imageDrawRef.value.imageRef) {
+      img = imageDrawRef.value.imageRef.value
+    } else {
+      img = imageDrawRef.value.imageRef
+    }
+  }
+  
+  if (img && img.complete) {
+    baseImageDisplaySize.value = {
+      width: img.offsetWidth || img.width,
+      height: img.offsetHeight || img.height
+    }
+    baseImageNaturalSize.value = {
+      width: img.naturalWidth || img.width,
+      height: img.naturalHeight || img.height
+    }
+  }
+}
+
+/**
+ * 이미지 로드 완료 핸들러
+ */
+const handleImageLoaded = (size) => {
+  if (isBatchMode.value && currentImageIndex.value === 0) {
+    saveBaseImageSize(size)
+  }
+}
+
+/**
+ * 모든 이미지를 한 번에 처리
+ */
+const processAllImages = async () => {
+  if (!isBatchMode.value) {
+    alert('일괄 처리 모드가 활성화되어 있지 않습니다.')
+    return
+  }
+  
+  if (sharedLines.value.length !== CONSTANTS.REQUIRED_LINES) {
+    alert(`${CONSTANTS.REQUIRED_LINES}개의 선분(수평 ${CONSTANTS.REQUIRED_HORIZONTAL}개, 수직 ${CONSTANTS.REQUIRED_VERTICAL}개)을 그려주세요.`)
+    return
+  }
+  
+  const horizontalLines = sharedLines.value.filter(l => l.type === 'horizontal')
+  const verticalLines = sharedLines.value.filter(l => l.type === 'vertical')
+  
+  if (horizontalLines.length !== CONSTANTS.REQUIRED_HORIZONTAL || verticalLines.length !== CONSTANTS.REQUIRED_VERTICAL) {
+    alert(`수평선 ${CONSTANTS.REQUIRED_HORIZONTAL}개와 수직선 ${CONSTANTS.REQUIRED_VERTICAL}개를 그려주세요.`)
+    return
+  }
+  
+  // 기준 이미지 크기 저장
+  saveBaseImageSize()
+
+  const baseImgElement = getProcessingImageElement()
+  if (!baseImgElement) {
+    alert('기준 이미지를 찾을 수 없습니다. 잠시 후 다시 시도해주세요.')
+    return
+  }
+
+  const conversion = convertLinesToImageCorners(sharedLines.value, baseImgElement)
+  if (!conversion) {
+    alert('기준 이미지에서 교점을 계산할 수 없습니다. 선분을 확인해주세요.')
+    return
+  }
+
+  const baseNaturalWidth = baseImgElement.naturalWidth || baseImgElement.width
+  const baseNaturalHeight = baseImgElement.naturalHeight || baseImgElement.height
+
+  if (!baseNaturalWidth || !baseNaturalHeight) {
+    alert('기준 이미지 크기를 확인할 수 없습니다.')
+    return
+  }
+
+  const normalizedCorners = conversion.cornersInImage.map((point) => ({
+    x: point.x / baseNaturalWidth,
+    y: point.y / baseNaturalHeight
+  }))
+
+  // 처리 시작
+  isProcessingAll.value = true
+  processingProgress.value = { current: 0, total: imageList.value.length }
+
+  try {
+    for (let i = 0; i < imageList.value.length; i++) {
+      processingProgress.value.current = i + 1
+      const imageItem = imageList.value[i]
+
+      try {
+        const imgElement = await loadImageFromFile(imageItem.file)
+        const naturalWidth = imgElement.naturalWidth || imgElement.width
+        const naturalHeight = imgElement.naturalHeight || imgElement.height
+
+        const targetCorners = normalizedCorners.map((corner) => ({
+          x: corner.x * naturalWidth,
+          y: corner.y * naturalHeight
+        }))
+
+        const dataUrl = cropImageWithCorners(imgElement, targetCorners)
+        imageItem.processedUrl = dataUrl
+        processedImages.value[i] = dataUrl
+        console.log(`이미지 ${i + 1} 처리 완료`)
+      } catch (error) {
+        console.error(`이미지 ${i + 1} 처리 중 오류:`, error)
+        imageItem.processedUrl = null
+      }
+
+      await nextTick()
+    }
+
+    const firstProcessedIndex = imageList.value.findIndex((item) => item.processedUrl)
+    if (firstProcessedIndex >= 0) {
+      currentImageIndex.value = firstProcessedIndex
+      imageUrl.value = imageList.value[firstProcessedIndex].processedUrl
+      currentStep.value = 'result'
+      console.log('결과 페이지로 전환 완료:', {
+        index: currentImageIndex.value,
+        imageUrl: imageUrl.value,
+        processedUrl: imageList.value[firstProcessedIndex].processedUrl
+      })
+    } else {
+      console.error('처리된 이미지가 없습니다.')
+      alert('이미지 처리 중 오류가 발생했습니다. 다시 시도해주세요.')
+    }
+  } finally {
+    isProcessingAll.value = false
+    processingProgress.value = { current: 0, total: 0 }
+  }
+}
+
+/**
+ * 일괄 처리 모드 토글
+ */
+const toggleBatchMode = () => {
+  isBatchMode.value = !isBatchMode.value
+  
+  if (isBatchMode.value) {
+    // 일괄 처리 모드 활성화: 첫 번째 이미지로 이동
+    if (imageList.value.length > 0) {
+      startProcessingImage(0)
+    }
+  } else {
+    // 일괄 처리 모드 비활성화: 공유 선분 초기화
+    sharedLines.value = []
+    baseImageDisplaySize.value = { width: 0, height: 0 }
+    baseImageNaturalSize.value = { width: 0, height: 0 }
+  }
 }
 
 // ==================== Computed 속성 ====================
@@ -796,20 +981,66 @@ const saveImage = () => {
 }
 
 /**
- * 모든 이미지 다운로드
+ * 모든 이미지 다운로드 (Electron 환경에서는 폴더에 저장, 웹에서는 개별 다운로드)
  */
-const downloadAllImages = () => {
-  imageList.value.forEach((item, index) => {
-    if (item.processedUrl) {
-      setTimeout(() => {
-        const link = document.createElement('a')
-        const fileName = `corrected-${item.name}`
-        link.download = fileName
-        link.href = item.processedUrl
-        link.click()
-      }, index * 200) // 각 다운로드를 약간씩 지연시켜 순차적으로 처리
+const downloadAllImages = async () => {
+  // Electron 환경 확인
+  if (window.electronAPI) {
+    try {
+      // 폴더 선택 다이얼로그
+      const folderPath = await window.electronAPI.selectFolder()
+      
+      if (!folderPath) {
+        // 사용자가 취소한 경우
+        return
+      }
+      
+      // 저장할 파일 목록 준비
+      const filesToSave = imageList.value
+        .filter(item => item.processedUrl)
+        .map(item => ({
+          name: `corrected-${item.name}`,
+          data: item.processedUrl
+        }))
+      
+      if (filesToSave.length === 0) {
+        alert('저장할 이미지가 없습니다.')
+        return
+      }
+      
+      // 파일 저장
+      const result = await window.electronAPI.saveFiles(folderPath, filesToSave)
+      
+      if (result.success) {
+        const successCount = result.results.filter(r => r.success).length
+        const failCount = result.results.filter(r => !r.success).length
+        
+        if (failCount === 0) {
+          alert(`모든 이미지(${successCount}개)가 성공적으로 저장되었습니다.`)
+        } else {
+          alert(`${successCount}개 저장 성공, ${failCount}개 저장 실패`)
+        }
+      } else {
+        alert('이미지 저장 중 오류가 발생했습니다: ' + (result.error || '알 수 없는 오류'))
+      }
+    } catch (error) {
+      console.error('이미지 저장 오류:', error)
+      alert('이미지 저장 중 오류가 발생했습니다: ' + error.message)
     }
-  })
+  } else {
+    // 웹 환경: 기존 방식으로 개별 다운로드
+    imageList.value.forEach((item, index) => {
+      if (item.processedUrl) {
+        setTimeout(() => {
+          const link = document.createElement('a')
+          const fileName = `corrected-${item.name}`
+          link.download = fileName
+          link.href = item.processedUrl
+          link.click()
+        }, index * 200) // 각 다운로드를 약간씩 지연시켜 순차적으로 처리
+      }
+    })
+  }
 }
 
 /**
@@ -870,6 +1101,10 @@ const currentImageInfo = computed(() => {
     :progress-percentage="progressPercentage"
     :image-list-length="imageList.length"
     :instruction="showInstruction"
+    :is-batch-mode="isBatchMode"
+    :is-read-only="isBatchMode && currentImageIndex !== 0"
+    :is-processing-all="isProcessingAll"
+    :processing-progress="processingProgress"
     @line-added="handleLineAdded"
     @line-updated="handleLineUpdated"
     @line-duplicated="handleLineDuplicated"
@@ -879,6 +1114,9 @@ const currentImageInfo = computed(() => {
     @reset="resetProcess"
     @next="nextImage"
     @previous="previousImage"
+    @process-all="processAllImages"
+    @toggle-batch-mode="toggleBatchMode"
+    @image-loaded="handleImageLoaded"
   />
 
   <!-- 결과 확인 단계 -->
