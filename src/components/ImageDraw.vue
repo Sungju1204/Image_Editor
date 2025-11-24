@@ -152,12 +152,14 @@ watch(() => props.imageUrl, (newUrl) => {
 // 목록에서 선택된 선 변경 시, 하이라이트 및 커서/드래그 모드 준비
 watch(() => props.selectedLineId, (id) => {
   hoveredLineId.value = id ?? null
-  // 선택되면 그랩 모드로 들어가 클릭-홀드 없이 이동 가능
-  isGrabMode.value = id !== null
-  grabbedLineId.value = id ?? null
-  lastMousePos.value = null
-  if (wrapperRef.value) {
-    wrapperRef.value.style.cursor = id !== null ? 'move' : 'crosshair'
+  if (!handleAdjustTarget.value) {
+    // 선택되면 그랩 모드로 들어가 클릭-홀드 없이 이동 가능
+    isGrabMode.value = id !== null
+    grabbedLineId.value = id ?? null
+    lastMousePos.value = null
+    if (wrapperRef.value) {
+      wrapperRef.value.style.cursor = id !== null ? 'move' : 'crosshair'
+    }
   }
   redrawCanvas()
 })
@@ -220,8 +222,12 @@ const handleCanvasMouseDown = (event) => {
   if (handleAdjustTarget.value) {
     handleAdjustTarget.value = null
     hoveredHandle.value = null
+    isGrabMode.value = false
+    grabbedLineId.value = null
+    lastMousePos.value = null
+    emit('select-line', null)
     if (wrapperRef.value) {
-      wrapperRef.value.style.cursor = isGrabMode.value ? 'move' : 'crosshair'
+      wrapperRef.value.style.cursor = isDrawingLine.value ? 'crosshair' : 'default'
     }
     redrawCanvas()
     return
