@@ -19,6 +19,7 @@ const COLORS = {
   TEMP_LINE: '#888888',
   POINT: '#ff0000'
 }
+const HANDLE_PROXIMITY = 12
 // 타입 내 인덱스별 색상 팔레트
 const TYPE_PALETTE = {
   // 더 구분 쉬운 고대비 팔레트
@@ -93,6 +94,7 @@ const wrapperRef = ref(null)
 const imageRef = ref(null)
 const lineIdCounter = ref(0)
 const draggingLine = ref(null)
+const handleAdjustTarget = ref(null)
 const isGrabMode = ref(false)
 const grabbedLineId = ref(null)
 const dragOffset = ref({ x: 0, y: 0 })
@@ -100,6 +102,7 @@ const isDrawingLine = ref(false)
 const tempLineStart = ref(null)
 const tempLineType = ref(null)
 const hoveredLineId = ref(null)
+const hoveredHandle = ref(null)
 const currentMousePos = ref({ x: 0, y: 0 })
 const lastMousePos = ref(null)
 
@@ -180,6 +183,31 @@ const isPointOnLine = (point, line, threshold = CONSTANTS.POINT_ON_LINE_THRESHOL
   return dist <= threshold
 }
 
+const getDistance = (a, b) => {
+  const dx = a.x - b.x
+  const dy = a.y - b.y
+  return Math.sqrt(dx * dx + dy * dy)
+}
+
+const findHandleNearPoint = (point, threshold = HANDLE_PROXIMITY) => {
+  for (let i = props.lines.length - 1; i >= 0; i--) {
+    const line = props.lines[i]
+    if (getDistance(point, line.start) <= threshold) {
+      return { lineId: line.id, handleKey: 'start' }
+    }
+    if (getDistance(point, line.end) <= threshold) {
+      return { lineId: line.id, handleKey: 'end' }
+    }
+  }
+  return null
+}
+
+const determineLineType = (start, end) => {
+  const dx = Math.abs(end.x - start.x)
+  const dy = Math.abs(end.y - start.y)
+  return dx >= dy ? 'horizontal' : 'vertical'
+}
+
 /**
  * 선분 그리기 시작
  */
@@ -188,10 +216,37 @@ const handleCanvasMouseDown = (event) => {
   const x = event.clientX - rect.left
   const y = event.clientY - rect.top
   const point = { x, y }
+
+  if (handleAdjustTarget.value) {
+    handleAdjustTarget.value = null
+    hoveredHandle.value = null
+    if (wrapperRef.value) {
+      wrapperRef.value.style.cursor = isGrabMode.value ? 'move' : 'crosshair'
+    }
+    redrawCanvas()
+    return
+  }
+  
+  if (!props.isReadOnly) {
+    const nearHandle = findHandleNearPoint(point)
+    if (nearHandle) {
+      handleAdjustTarget.value = nearHandle
+      hoveredHandle.value = nearHandle
+      isDrawingLine.value = false
+      tempLineStart.value = null
+      tempLineType.value = null
+      isGrabMode.value = false
+      grabbedLineId.value = null
+      lastMousePos.value = null
+      emit('select-line', nearHandle.lineId)
+      if (wrapperRef.value) wrapperRef.value.style.cursor = 'grabbing'
+      redrawCanvas()
+      return
+    }
+  }
   
   // 목록에서 선택된 선이 있는 경우 처리
   if (props.selectedLineId !== null || isGrabMode.value) {
-    // 먼저 선 위를 클릭했는지 확인
     let clickedOnLine = false
     for (let i = props.lines.length - 1; i >= 0; i--) {
       const line = props.lines[i]
@@ -199,17 +254,16 @@ const handleCanvasMouseDown = (event) => {
         clickedOnLine = true
         const currentSelectedId = props.selectedLineId || grabbedLineId.value
         if (currentSelectedId === line.id) {
-          // 같은 선을 다시 클릭하면 그랩 모드 해제 (토글)
           isGrabMode.value = false
           grabbedLineId.value = null
           lastMousePos.value = null
           hoveredLineId.value = null
+          hoveredHandle.value = null
           emit('select-line', null)
           if (wrapperRef.value) wrapperRef.value.style.cursor = 'crosshair'
           redrawCanvas()
           return
         } else {
-          // 다른 선을 클릭하면 그 선으로 그랩 모드 전환
           isDrawingLine.value = false
           tempLineStart.value = null
           tempLineType.value = null
@@ -217,6 +271,7 @@ const handleCanvasMouseDown = (event) => {
           grabbedLineId.value = line.id
           lastMousePos.value = { x, y }
           hoveredLineId.value = line.id
+          hoveredHandle.value = null
           emit('select-line', line.id)
           if (wrapperRef.value) wrapperRef.value.style.cursor = 'move'
           redrawCanvas()
@@ -225,33 +280,30 @@ const handleCanvasMouseDown = (event) => {
       }
     }
     
-    // 선 위가 아닌 빈 공간을 클릭하면 그랩 모드 해제
     if (!clickedOnLine) {
       isGrabMode.value = false
       grabbedLineId.value = null
       lastMousePos.value = null
       hoveredLineId.value = null
+      hoveredHandle.value = null
       emit('select-line', null)
       if (wrapperRef.value) wrapperRef.value.style.cursor = 'crosshair'
       redrawCanvas()
-      // 그랩 모드 해제 후에는 선 그리기로 진행
     }
   }
   
-  // 기존 선분 클릭 확인 (그랩 모드 활성화) - 목록 선택이 없을 때만
   if (props.selectedLineId === null && !isGrabMode.value) {
     for (let i = props.lines.length - 1; i >= 0; i--) {
       const line = props.lines[i]
       if (isPointOnLine(point, line)) {
-        // 같은 선을 다시 클릭하면 그랩 모드 해제 (토글)
         if (isGrabMode.value && grabbedLineId.value === line.id) {
           isGrabMode.value = false
           grabbedLineId.value = null
           lastMousePos.value = null
+          hoveredHandle.value = null
           emit('select-line', null)
           if (wrapperRef.value) wrapperRef.value.style.cursor = 'crosshair'
         } else {
-          // 그랩 모드 활성화
           isDrawingLine.value = false
           tempLineStart.value = null
           tempLineType.value = null
@@ -259,6 +311,7 @@ const handleCanvasMouseDown = (event) => {
           grabbedLineId.value = line.id
           lastMousePos.value = { x, y }
           hoveredLineId.value = line.id
+          hoveredHandle.value = null
           emit('select-line', line.id)
           if (wrapperRef.value) wrapperRef.value.style.cursor = 'move'
         }
@@ -268,34 +321,23 @@ const handleCanvasMouseDown = (event) => {
     }
   }
   
-  // 읽기 전용 모드에서는 선 그리기 불가
   if (props.isReadOnly) {
     return
   }
   
-  // 선분 그리기 시작
   if (!isDrawingLine.value && props.lines.length < CONSTANTS.REQUIRED_LINES) {
     isDrawingLine.value = true
     tempLineStart.value = { x, y }
     tempLineType.value = null
+    hoveredHandle.value = null
     redrawCanvas()
   } else if (isDrawingLine.value && tempLineStart.value) {
-    // 두 번째 점 클릭 - 선분 완성
-    let end = { x, y }
+    const endPoint = { x, y }
     
     if (!tempLineType.value) {
-      const dx = Math.abs(end.x - tempLineStart.value.x)
-      const dy = Math.abs(end.y - tempLineStart.value.y)
-      tempLineType.value = dx > dy ? 'horizontal' : 'vertical'
+      tempLineType.value = determineLineType(tempLineStart.value, endPoint)
     }
     
-    if (tempLineType.value === 'horizontal') {
-      end.y = tempLineStart.value.y
-    } else {
-      end.x = tempLineStart.value.x
-    }
-    
-    // 타입별 최대 2개 제한
     const sameTypeCount = props.lines.filter(l => l.type === tempLineType.value).length
     if (sameTypeCount >= 2) {
       alert(`${tempLineType.value === 'horizontal' ? '수평선' : '수직선'}은 최대 2개까지 생성할 수 있습니다.`)
@@ -309,7 +351,7 @@ const handleCanvasMouseDown = (event) => {
     const newLine = {
       id: lineIdCounter.value++,
       start: { ...tempLineStart.value },
-      end: end,
+      end: { ...endPoint },
       type: tempLineType.value
     }
     
@@ -317,6 +359,7 @@ const handleCanvasMouseDown = (event) => {
     isDrawingLine.value = false
     tempLineStart.value = null
     tempLineType.value = null
+    hoveredHandle.value = null
     redrawCanvas()
   }
 }
@@ -328,8 +371,8 @@ const handleCanvasMouseUp = () => {
   if (draggingLine.value !== null) {
     draggingLine.value = null
     dragOffset.value = { x: 0, y: 0 }
-    redrawCanvas()
   }
+  redrawCanvas()
 }
 
 /**
@@ -340,6 +383,25 @@ const handleCanvasMouseMove = (event) => {
   const x = event.clientX - rect.left
   const y = event.clientY - rect.top
   currentMousePos.value = { x, y }
+  const point = { x, y }
+  
+  if (handleAdjustTarget.value) {
+    const line = props.lines.find(l => l.id === handleAdjustTarget.value.lineId)
+    if (line) {
+      const updatedLine = {
+        ...line,
+        start: { ...line.start },
+        end: { ...line.end }
+      }
+      updatedLine[handleAdjustTarget.value.handleKey] = { x, y }
+      emit('line-updated', updatedLine)
+      hoveredLineId.value = line.id
+      hoveredHandle.value = { ...handleAdjustTarget.value }
+      if (wrapperRef.value) wrapperRef.value.style.cursor = 'grabbing'
+    }
+    redrawCanvas()
+    return
+  }
   
   // 그랩 모드: 클릭-홀드 없이 이동
   if (isGrabMode.value && grabbedLineId.value !== null) {
@@ -351,13 +413,16 @@ const handleCanvasMouseMove = (event) => {
         const dx = x - lastMousePos.value.x
         const dy = y - lastMousePos.value.y
         if (dx !== 0 || dy !== 0) {
-          const updatedLine = { ...line }
-          if (line.type === 'horizontal') {
-            updatedLine.start.y += dy
-            updatedLine.end.y += dy
-          } else {
-            updatedLine.start.x += dx
-            updatedLine.end.x += dx
+          const updatedLine = {
+            ...line,
+            start: {
+              x: line.start.x + dx,
+              y: line.start.y + dy
+            },
+            end: {
+              x: line.end.x + dx,
+              y: line.end.y + dy
+            }
           }
           emit('line-updated', updatedLine)
           lastMousePos.value = { x, y }
@@ -367,20 +432,22 @@ const handleCanvasMouseMove = (event) => {
     }
   }
   
-  // 드래그 중인 선분 이동
   if (draggingLine.value !== null) {
     const line = props.lines.find(l => l.id === draggingLine.value)
     if (line) {
       const dx = x - (line.start.x + dragOffset.value.x)
       const dy = y - (line.start.y + dragOffset.value.y)
       
-      const updatedLine = { ...line }
-      if (line.type === 'horizontal') {
-        updatedLine.start.y += dy
-        updatedLine.end.y += dy
-      } else {
-        updatedLine.start.x += dx
-        updatedLine.end.x += dx
+      const updatedLine = {
+        ...line,
+        start: {
+          x: line.start.x + dx,
+          y: line.start.y + dy
+        },
+        end: {
+          x: line.end.x + dx,
+          y: line.end.y + dy
+        }
       }
       
       emit('line-updated', updatedLine)
@@ -389,19 +456,35 @@ const handleCanvasMouseMove = (event) => {
     return
   }
   
-  // 호버 효과
-  const point = { x, y }
-  let foundHover = false
-  for (let i = props.lines.length - 1; i >= 0; i--) {
-    const line = props.lines[i]
-    if (isPointOnLine(point, line)) {
-      hoveredLineId.value = line.id
-      foundHover = true
-      if (canvasRef.value) {
-        canvasRef.value.style.cursor = 'move'
+  hoveredHandle.value = null
+  if (!props.isReadOnly) {
+    const nearHandle = findHandleNearPoint(point)
+    if (nearHandle) {
+      hoveredHandle.value = nearHandle
+      hoveredLineId.value = nearHandle.lineId
+      if (wrapperRef.value && !isGrabMode.value) {
+        wrapperRef.value.style.cursor = 'pointer'
       }
-      break
+    } else if (wrapperRef.value && !isGrabMode.value) {
+      wrapperRef.value.style.cursor = isDrawingLine.value ? 'crosshair' : 'default'
     }
+  }
+  
+  let foundHover = false
+  if (!hoveredHandle.value) {
+    for (let i = props.lines.length - 1; i >= 0; i--) {
+      const line = props.lines[i]
+      if (isPointOnLine(point, line)) {
+        hoveredLineId.value = line.id
+        foundHover = true
+        if (canvasRef.value) {
+          canvasRef.value.style.cursor = 'move'
+        }
+        break
+      }
+    }
+  } else {
+    foundHover = true
   }
   
   if (!foundHover) {
@@ -411,7 +494,6 @@ const handleCanvasMouseMove = (event) => {
     }
   }
   
-  // 임시 선분 그리기
   if (isDrawingLine.value && tempLineStart.value) {
     if (!tempLineType.value) {
       const dx = Math.abs(x - tempLineStart.value.x)
@@ -429,10 +511,10 @@ const handleCanvasMouseMove = (event) => {
  */
 const handleCanvasMouseLeave = () => {
   draggingLine.value = null
-  // 그랩 모드는 유지
   hoveredLineId.value = null
-  if (canvasRef.value) {
-    canvasRef.value.style.cursor = isGrabMode.value ? 'move' : (isDrawingLine.value ? 'crosshair' : 'default')
+  hoveredHandle.value = null
+  if (wrapperRef.value && !isGrabMode.value && !handleAdjustTarget.value) {
+    wrapperRef.value.style.cursor = isDrawingLine.value ? 'crosshair' : 'default'
   }
   if (!isDrawingLine.value) {
     redrawCanvas()
@@ -496,6 +578,8 @@ const handleSelectLine = (id) => {
     grabbedLineId.value = null
     lastMousePos.value = null
     hoveredLineId.value = null
+    hoveredHandle.value = null
+    handleAdjustTarget.value = null
     emit('select-line', null) // 부모 선택 해제
     if (wrapperRef.value) wrapperRef.value.style.cursor = 'crosshair'
     redrawCanvas()
@@ -505,6 +589,8 @@ const handleSelectLine = (id) => {
     tempLineStart.value = null
     tempLineType.value = null
     hoveredLineId.value = id
+    hoveredHandle.value = null
+    handleAdjustTarget.value = null
     emit('select-line', id)
     isGrabMode.value = true
     grabbedLineId.value = id
@@ -540,6 +626,16 @@ const redrawCanvas = () => {
   // 타입 내 인덱스 계산 (H1/H2, V1/V2 구분)
   const typeOrder = { horizontal: [], vertical: [] }
   props.lines.forEach(l => { typeOrder[l.type].push(l.id) })
+  const getHandleColor = (lineId, key) => {
+    if (handleAdjustTarget.value && handleAdjustTarget.value.lineId === lineId && handleAdjustTarget.value.handleKey === key) {
+      return COLORS.DRAGGING_LINE
+    }
+    if (hoveredHandle.value && hoveredHandle.value.lineId === lineId && hoveredHandle.value.handleKey === key) {
+      return COLORS.HOVERED_LINE
+    }
+    return COLORS.POINT
+  }
+
   props.lines.forEach((line) => {
     const isHovered = hoveredLineId.value === line.id || props.selectedLineId === line.id
     const isDragging = draggingLine.value === line.id
@@ -564,10 +660,11 @@ const redrawCanvas = () => {
     ctx.font = 'bold 14px Arial'
     ctx.fillText(line.type === 'horizontal' ? 'H' : 'V', midX + 8, midY - 8)
     
-    ctx.fillStyle = COLORS.POINT
+    ctx.fillStyle = getHandleColor(line.id, 'start')
     ctx.beginPath()
     ctx.arc(line.start.x, line.start.y, 6, 0, Math.PI * 2)
     ctx.fill()
+    ctx.fillStyle = getHandleColor(line.id, 'end')
     ctx.beginPath()
     ctx.arc(line.end.x, line.end.y, 6, 0, Math.PI * 2)
     ctx.fill()
@@ -580,14 +677,8 @@ const redrawCanvas = () => {
     ctx.arc(tempLineStart.value.x, tempLineStart.value.y, 8, 0, Math.PI * 2)
     ctx.fill()
     
-    let mouseX = currentMousePos.value.x || tempLineStart.value.x
-    let mouseY = currentMousePos.value.y || tempLineStart.value.y
-    
-    if (tempLineType.value === 'horizontal') {
-      mouseY = tempLineStart.value.y
-    } else if (tempLineType.value === 'vertical') {
-      mouseX = tempLineStart.value.x
-    }
+    const mouseX = currentMousePos.value.x || tempLineStart.value.x
+    const mouseY = currentMousePos.value.y || tempLineStart.value.y
     
     ctx.strokeStyle = COLORS.TEMP_LINE
     ctx.lineWidth = 2
@@ -624,47 +715,12 @@ const getLineIntersection = (line1, line2) => {
   const { start: p1, end: p2 } = line1
   const { start: p3, end: p4 } = line2
   
-  // 수평선과 수직선 교점 계산 최적화
-  if (line1.type === 'horizontal' && line2.type === 'vertical') {
-    // line1은 수평선 (y가 일정), line2는 수직선 (x가 일정)
-    const y = p1.y // 수평선의 y 좌표
-    const x = p3.x // 수직선의 x 좌표
-    
-    // 선분 범위 내에 있는지 확인
-    const hMinX = Math.min(p1.x, p2.x)
-    const hMaxX = Math.max(p1.x, p2.x)
-    const vMinY = Math.min(p3.y, p4.y)
-    const vMaxY = Math.max(p3.y, p4.y)
-    
-    if (x >= hMinX && x <= hMaxX && y >= vMinY && y <= vMaxY) {
-      return { x, y }
-    }
-    return null
-  } else if (line1.type === 'vertical' && line2.type === 'horizontal') {
-    // line1은 수직선 (x가 일정), line2는 수평선 (y가 일정)
-    const x = p1.x // 수직선의 x 좌표
-    const y = p3.y // 수평선의 y 좌표
-    
-    // 선분 범위 내에 있는지 확인
-    const vMinY = Math.min(p1.y, p2.y)
-    const vMaxY = Math.max(p1.y, p2.y)
-    const hMinX = Math.min(p3.x, p4.x)
-    const hMaxX = Math.max(p3.x, p4.x)
-    
-    if (x >= hMinX && x <= hMaxX && y >= vMinY && y <= vMaxY) {
-      return { x, y }
-    }
-    return null
-  }
-  
-  // 일반적인 경우: 기존 로직 사용
   const denom = (p1.x - p2.x) * (p3.y - p4.y) - (p1.y - p2.y) * (p3.x - p4.x)
-  if (Math.abs(denom) < 0.001) return null // 평행한 선분
+  if (Math.abs(denom) < 0.001) return null
   
   const t = ((p1.x - p3.x) * (p3.y - p4.y) - (p1.y - p3.y) * (p3.x - p4.x)) / denom
   const s = ((p1.x - p3.x) * (p1.y - p2.y) - (p1.y - p3.y) * (p1.x - p2.x)) / denom
   
-  // t와 s가 0~1 범위 내에 있어야 선분 위의 교점
   if (t >= 0 && t <= 1 && s >= 0 && s <= 1) {
     return {
       x: p1.x + t * (p2.x - p1.x),

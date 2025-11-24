@@ -226,55 +226,20 @@ const handleLineSelected = (lineId) => {
 const getLineIntersection = (line1, line2) => {
   const { start: p1, end: p2 } = line1
   const { start: p3, end: p4 } = line2
-  
-  // 수평선과 수직선 교점 계산 최적화
-  if (line1.type === 'horizontal' && line2.type === 'vertical') {
-    // line1은 수평선 (y가 일정), line2는 수직선 (x가 일정)
-    const y = p1.y // 수평선의 y 좌표
-    const x = p3.x // 수직선의 x 좌표
-    
-    // 선분 범위 내에 있는지 확인
-    const hMinX = Math.min(p1.x, p2.x)
-    const hMaxX = Math.max(p1.x, p2.x)
-    const vMinY = Math.min(p3.y, p4.y)
-    const vMaxY = Math.max(p3.y, p4.y)
-    
-    if (x >= hMinX && x <= hMaxX && y >= vMinY && y <= vMaxY) {
-      return { x, y }
-    }
-    return null
-  } else if (line1.type === 'vertical' && line2.type === 'horizontal') {
-    // line1은 수직선 (x가 일정), line2는 수평선 (y가 일정)
-    const x = p1.x // 수직선의 x 좌표
-    const y = p3.y // 수평선의 y 좌표
-    
-    // 선분 범위 내에 있는지 확인
-    const vMinY = Math.min(p1.y, p2.y)
-    const vMaxY = Math.max(p1.y, p2.y)
-    const hMinX = Math.min(p3.x, p4.x)
-    const hMaxX = Math.max(p3.x, p4.x)
-    
-    if (x >= hMinX && x <= hMaxX && y >= vMinY && y <= vMaxY) {
-      return { x, y }
-    }
-    return null
-  }
-  
-  // 일반적인 경우: 기존 로직 사용
+
   const denom = (p1.x - p2.x) * (p3.y - p4.y) - (p1.y - p2.y) * (p3.x - p4.x)
-  if (Math.abs(denom) < 0.001) return null // 평행한 선분
-  
+  if (Math.abs(denom) < 0.001) return null // 평행하거나 거의 평행
+
   const t = ((p1.x - p3.x) * (p3.y - p4.y) - (p1.y - p3.y) * (p3.x - p4.x)) / denom
   const s = ((p1.x - p3.x) * (p1.y - p2.y) - (p1.y - p3.y) * (p1.x - p2.x)) / denom
-  
-  // t와 s가 0~1 범위 내에 있어야 선분 위의 교점
+
   if (t >= 0 && t <= 1 && s >= 0 && s <= 1) {
     return {
       x: p1.x + t * (p2.x - p1.x),
       y: p1.y + t * (p2.y - p1.y)
     }
   }
-  
+
   return null
 }
 
@@ -411,72 +376,137 @@ const convertLinesToImageCorners = (linesSource, imgElement) => {
   }
 }
 
-/**
- * 코너 정보를 기반으로 출력 사이즈와 크롭 영역 계산
- */
-const calculateCropMetrics = (cornersInImage, imgNaturalWidth, imgNaturalHeight) => {
-  const w1 = Math.sqrt(Math.pow(cornersInImage[1].x - cornersInImage[0].x, 2) + Math.pow(cornersInImage[1].y - cornersInImage[0].y, 2))
-  const w2 = Math.sqrt(Math.pow(cornersInImage[2].x - cornersInImage[3].x, 2) + Math.pow(cornersInImage[2].y - cornersInImage[3].y, 2))
-  const h1 = Math.sqrt(Math.pow(cornersInImage[3].x - cornersInImage[0].x, 2) + Math.pow(cornersInImage[3].y - cornersInImage[0].y, 2))
-  const h2 = Math.sqrt(Math.pow(cornersInImage[2].x - cornersInImage[1].x, 2) + Math.pow(cornersInImage[2].y - cornersInImage[1].y, 2))
+const calculateWarpTargetSize = (cornersInImage) => {
+  if (!cornersInImage || cornersInImage.length !== 4) {
+    return { width: 1, height: 1 }
+  }
 
-  const avgWidth = (w1 + w2) / 2
-  const avgHeight = (h1 + h2) / 2
-  const avgSize = (avgWidth + avgHeight) / 2
-  const minSize = Math.max(imgNaturalWidth, imgNaturalHeight) * 0.3
-  const width = Math.max(avgSize || minSize, minSize, 300)
-  const height = Math.max(avgSize || minSize, minSize, 300)
-
-  const allX = cornersInImage.map((point) => point.x)
-  const allY = cornersInImage.map((point) => point.y)
-
-  const minX = Math.max(0, Math.floor(Math.min(...allX) - 1))
-  const maxX = Math.min(imgNaturalWidth, Math.ceil(Math.max(...allX) + 1))
-  const minY = Math.max(0, Math.floor(Math.min(...allY) - 1))
-  const maxY = Math.min(imgNaturalHeight, Math.ceil(Math.max(...allY) + 1))
-
-  const cropWidth = maxX - minX
-  const cropHeight = maxY - minY
+  const distance = (a, b) => Math.hypot(a.x - b.x, a.y - b.y)
+  const widthTop = distance(cornersInImage[0], cornersInImage[1])
+  const widthBottom = distance(cornersInImage[3], cornersInImage[2])
+  const heightLeft = distance(cornersInImage[0], cornersInImage[3])
+  const heightRight = distance(cornersInImage[1], cornersInImage[2])
 
   return {
-    width,
-    height,
-    minX,
-    minY,
-    cropWidth,
-    cropHeight
+    width: Math.max(1, Math.round(Math.max(widthTop, widthBottom))),
+    height: Math.max(1, Math.round(Math.max(heightLeft, heightRight)))
   }
+}
+
+const createTriangleMatrix = (triangle) => ([
+  [triangle[0].x, triangle[1].x, triangle[2].x],
+  [triangle[0].y, triangle[1].y, triangle[2].y],
+  [1, 1, 1]
+])
+
+const multiplyMatrix3 = (a, b) => {
+  const result = Array.from({ length: 3 }, () => Array(3).fill(0))
+  for (let row = 0; row < 3; row++) {
+    for (let col = 0; col < 3; col++) {
+      for (let k = 0; k < 3; k++) {
+        result[row][col] += a[row][k] * b[k][col]
+      }
+    }
+  }
+  return result
+}
+
+const invertMatrix3 = (m) => {
+  const det =
+    m[0][0] * (m[1][1] * m[2][2] - m[1][2] * m[2][1]) -
+    m[0][1] * (m[1][0] * m[2][2] - m[1][2] * m[2][0]) +
+    m[0][2] * (m[1][0] * m[2][1] - m[1][1] * m[2][0])
+
+  if (Math.abs(det) < 1e-8) return null
+  const invDet = 1 / det
+
+  return [
+    [
+      (m[1][1] * m[2][2] - m[1][2] * m[2][1]) * invDet,
+      (m[0][2] * m[2][1] - m[0][1] * m[2][2]) * invDet,
+      (m[0][1] * m[1][2] - m[0][2] * m[1][1]) * invDet
+    ],
+    [
+      (m[1][2] * m[2][0] - m[1][0] * m[2][2]) * invDet,
+      (m[0][0] * m[2][2] - m[0][2] * m[2][0]) * invDet,
+      (m[0][2] * m[1][0] - m[0][0] * m[1][2]) * invDet
+    ],
+    [
+      (m[1][0] * m[2][1] - m[1][1] * m[2][0]) * invDet,
+      (m[0][1] * m[2][0] - m[0][0] * m[2][1]) * invDet,
+      (m[0][0] * m[1][1] - m[0][1] * m[1][0]) * invDet
+    ]
+  ]
+}
+
+const getTriangleTransform = (srcTriangle, destTriangle) => {
+  const srcMatrix = createTriangleMatrix(srcTriangle)
+  const destMatrix = createTriangleMatrix(destTriangle)
+  const inverseSrc = invertMatrix3(srcMatrix)
+  if (!inverseSrc) return null
+
+  const transformMatrix = multiplyMatrix3(destMatrix, inverseSrc)
+  return {
+    a: transformMatrix[0][0],
+    b: transformMatrix[1][0],
+    c: transformMatrix[0][1],
+    d: transformMatrix[1][1],
+    e: transformMatrix[0][2],
+    f: transformMatrix[1][2]
+  }
+}
+
+const drawTriangleMapping = (ctx, imgElement, srcTriangle, destTriangle) => {
+  const transform = getTriangleTransform(srcTriangle, destTriangle)
+  if (!transform) return
+
+  ctx.save()
+  ctx.beginPath()
+  ctx.moveTo(destTriangle[0].x, destTriangle[0].y)
+  ctx.lineTo(destTriangle[1].x, destTriangle[1].y)
+  ctx.lineTo(destTriangle[2].x, destTriangle[2].y)
+  ctx.closePath()
+  ctx.clip()
+  ctx.transform(transform.a, transform.b, transform.c, transform.d, transform.e, transform.f)
+  ctx.drawImage(imgElement, 0, 0)
+  ctx.restore()
 }
 
 /**
  * 주어진 이미지와 코너로 크롭/리사이즈 수행
  */
 const cropImageWithCorners = (imgElement, cornersInImage) => {
-  const imgNaturalWidth = imgElement.naturalWidth || imgElement.width
-  const imgNaturalHeight = imgElement.naturalHeight || imgElement.height
-  const metrics = calculateCropMetrics(cornersInImage, imgNaturalWidth, imgNaturalHeight)
-
-  if (metrics.cropWidth <= 0 || metrics.cropHeight <= 0) {
-    throw new Error('Invalid crop area: ' + JSON.stringify(metrics))
+  if (!cornersInImage || cornersInImage.length !== 4) {
+    throw new Error('네 개의 교점이 필요합니다.')
   }
 
+  const targetSize = calculateWarpTargetSize(cornersInImage)
   const canvas = document.createElement('canvas')
-  canvas.width = metrics.width
-  canvas.height = metrics.height
+  canvas.width = targetSize.width
+  canvas.height = targetSize.height
   const ctx = canvas.getContext('2d')
 
   ctx.fillStyle = COLORS.BACKGROUND
-  ctx.fillRect(0, 0, metrics.width, metrics.height)
-  ctx.drawImage(
+  ctx.fillRect(0, 0, canvas.width, canvas.height)
+
+  const destCorners = [
+    { x: 0, y: 0 },
+    { x: canvas.width, y: 0 },
+    { x: canvas.width, y: canvas.height },
+    { x: 0, y: canvas.height }
+  ]
+
+  drawTriangleMapping(
+    ctx,
     imgElement,
-    metrics.minX,
-    metrics.minY,
-    metrics.cropWidth,
-    metrics.cropHeight,
-    0,
-    0,
-    metrics.width,
-    metrics.height
+    [cornersInImage[0], cornersInImage[1], cornersInImage[3]],
+    [destCorners[0], destCorners[1], destCorners[3]]
+  )
+  drawTriangleMapping(
+    ctx,
+    imgElement,
+    [cornersInImage[1], cornersInImage[2], cornersInImage[3]],
+    [destCorners[1], destCorners[2], destCorners[3]]
   )
 
   return canvas.toDataURL('image/png')
